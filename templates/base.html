@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ExpenseTracker{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.setAttribute('data-theme',t)})();</script>
+</head>
+<body>
+    {% if session.get('user_id') %}
+    <nav class="navbar">
+        <div class="nav-left">
+            <button class="hamburger" id="menuToggle" aria-label="Menu"><i data-lucide="menu" class="icon"></i></button>
+            <a href="{{ url_for('dashboard') }}" class="nav-brand"><i data-lucide="wallet" class="icon"></i> ExpenseTracker</a>
+        </div>
+        <div class="nav-links" id="navLinks">
+            <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}"><i data-lucide="layout-dashboard" class="icon-sm"></i> Dashboard</a>
+            <a href="{{ url_for('income') }}" class="{% if request.endpoint == 'income' %}active{% endif %}"><i data-lucide="banknote" class="icon-sm"></i> Income</a>
+            <a href="{{ url_for('expenses') }}" class="{% if request.endpoint == 'expenses' %}active{% endif %}"><i data-lucide="receipt" class="icon-sm"></i> Expenses</a>
+            <a href="{{ url_for('investments') }}" class="{% if request.endpoint == 'investments' %}active{% endif %}"><i data-lucide="trending-up" class="icon-sm"></i> Investments</a>
+            <a href="{{ url_for('budgets') }}" class="{% if request.endpoint == 'budgets' %}active{% endif %}"><i data-lucide="pie-chart" class="icon-sm"></i> Budgets</a>
+            <a href="{{ url_for('circle') }}" class="{% if request.endpoint == 'circle' %}active{% endif %}"><i data-lucide="users" class="icon-sm"></i> Circle</a>
+        </div>
+        <div class="nav-user">
+            {% if user %}
+            <div class="profile-menu-wrap" id="profileMenuWrap">
+                <button class="profile-trigger" id="profileTrigger" aria-label="Profile menu" aria-expanded="false" aria-haspopup="true">
+                    {% if user and user['profile_pic'] %}
+                    <img src="{{ url_for('static', filename='uploads/' + user['profile_pic']) }}" alt="" class="nav-avatar-img">
+                    {% else %}
+                    <div class="nav-avatar" style="background:{{ user['avatar_color'] or '#6366f1' }}">{{ session.get('display_name','U')[0] }}</div>
+                    {% endif %}
+                    <span class="profile-name">{{ session.get('display_name','') }}</span>
+                    <i data-lucide="chevron-down" class="icon-sm profile-chevron"></i>
+                </button>
+                <div class="profile-dropdown" id="profileDropdown" role="menu">
+                    <div class="profile-dropdown-header">
+                        {% if user and user['profile_pic'] %}
+                        <img src="{{ url_for('static', filename='uploads/' + user['profile_pic']) }}" alt="" class="nav-avatar-img" style="width:40px;height:40px;">
+                        {% else %}
+                        <div class="nav-avatar" style="background:{{ user['avatar_color'] or '#6366f1' }};width:40px;height:40px;font-size:1rem">{{ session.get('display_name','U')[0] }}</div>
+                        {% endif %}
+                        <div>
+                            <div class="profile-dropdown-name">{{ session.get('display_name','') }}</div>
+                            <div class="profile-dropdown-user">@{{ session.get('username','') }}</div>
+                        </div>
+                    </div>
+                    <div class="profile-dropdown-divider"></div>
+                    <div class="profile-dropdown-item theme-switch-item" id="themeToggle" role="menuitem" tabindex="0">
+                        <span class="theme-icon-light"><i data-lucide="moon" class="icon-sm"></i></span>
+                        <span class="theme-icon-dark"><i data-lucide="sun" class="icon-sm"></i></span>
+                        <span class="theme-label-light">Dark Mode</span>
+                        <span class="theme-label-dark">Light Mode</span>
+                    </div>
+                    <button type="button" class="profile-dropdown-item" role="menuitem" id="openChangePassword"><i data-lucide="key" class="icon-sm"></i> Change Password</button>
+                    <button type="button" class="profile-dropdown-item" role="menuitem" id="openMyProfile"><i data-lucide="user-circle" class="icon-sm"></i> My Profile</button>
+                    <div class="profile-dropdown-divider"></div>
+                    <a href="{{ url_for('signout') }}" class="profile-dropdown-item profile-dropdown-danger" role="menuitem"><i data-lucide="log-out" class="icon-sm"></i> Sign Out</a>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </nav>
+    {% endif %}
+    <!-- Change Password Dialog -->
+    {% if session.get('user_id') %}
+    <dialog class="cp-dialog" id="changePasswordDialog">
+        <div class="cp-dialog-content">
+            <div class="cp-dialog-header">
+                <h2><i data-lucide="lock" class="icon-sm"></i> Change Password</h2>
+                <button type="button" class="cp-dialog-close" id="closeChangePassword" aria-label="Close"><i data-lucide="x" class="icon-sm"></i></button>
+            </div>
+            <form id="changePasswordForm" method="POST" action="{{ url_for('change_password') }}">
+                <div class="cp-dialog-body">
+                    <div class="cp-dialog-msg" id="cpMsg"></div>
+                    <div class="form-group">
+                        <label for="dlg_current_password">Current Password</label>
+                        <input type="password" id="dlg_current_password" name="current_password" required minlength="6" placeholder="Enter current password">
+                    </div>
+                    <div class="form-group">
+                        <label for="dlg_new_password">New Password</label>
+                        <input type="password" id="dlg_new_password" name="new_password" required minlength="6" placeholder="At least 6 characters">
+                    </div>
+                    <div class="form-group">
+                        <label for="dlg_confirm_password">Confirm New Password</label>
+                        <input type="password" id="dlg_confirm_password" name="confirm_password" required minlength="6" placeholder="Repeat new password">
+                    </div>
+                </div>
+                <div class="cp-dialog-footer">
+                    <button type="button" class="btn btn-secondary" id="cancelChangePassword">Cancel</button>
+                    <button type="submit" class="btn btn-primary"><i data-lucide="check" class="icon-sm"></i> Update Password</button>
+                </div>
+            </form>
+        </div>
+    </dialog>
+    <!-- My Profile Dialog -->
+    <dialog class="cp-dialog" id="myProfileDialog">
+        <div class="cp-dialog-content">
+            <div class="cp-dialog-header">
+                <h2><i data-lucide="user-circle" class="icon-sm"></i> My Profile</h2>
+                <button type="button" class="cp-dialog-close" id="closeMyProfile" aria-label="Close"><i data-lucide="x" class="icon-sm"></i></button>
+            </div>
+            <div class="cp-dialog-body">
+                <div class="cp-dialog-msg" id="profileMsg"></div>
+                <div class="profile-dialog-top">
+                    <div class="profile-pic-wrap" id="profilePicWrap">
+                        {% if user and user['profile_pic'] %}
+                        <img src="{{ url_for('static', filename='uploads/' + user['profile_pic']) }}" alt="Profile" class="profile-pic-img" id="profilePicImg">
+                        {% else %}
+                        <div class="avatar-large" id="profileAvatarPreview" style="background:{{ user['avatar_color'] or '#6366f1' if user else '#6366f1' }}">{{ session.get('display_name','U')[0] }}</div>
+                        {% endif %}
+                        <label class="profile-pic-overlay" for="profilePicInput" title="Change photo">
+                            <i data-lucide="camera" class="icon-sm"></i>
+                        </label>
+                    </div>
+                    <div class="profile-details">
+                        <div class="profile-name">{{ session.get('display_name','') }}</div>
+                        <div class="profile-username">@{{ session.get('username','') }}</div>
+                        <div class="profile-pic-actions">
+                            <label for="profilePicInput" class="btn btn-sm btn-outline profile-pic-btn"><i data-lucide="upload" class="icon-xs"></i> Upload Photo</label>
+                            {% if user and user['profile_pic'] %}
+                            <button type="button" class="btn btn-sm btn-outline-danger" id="removeProfilePic"><i data-lucide="trash-2" class="icon-xs"></i> Remove</button>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                <input type="file" id="profilePicInput" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+                <form id="avatarForm" method="POST" action="{{ url_for('update_avatar') }}" style="margin-top:1rem;">
+                    <label style="font-size:.8rem;font-weight:600;color:var(--text-muted);display:block;margin-bottom:.4rem;">Avatar Color (fallback)</label>
+                    <div class="color-options" style="margin-bottom:.8rem;">
+                        {% for c in ['#6366f1','#f43f5e','#10b981','#f59e0b','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#06b6d4'] %}
+                        <label class="color-swatch"><input type="radio" name="avatar_color" value="{{ c }}" {% if (user['avatar_color'] or '#6366f1') == c %}checked{% endif %}><span style="background:{{ c }}"></span></label>
+                        {% endfor %}
+                    </div>
+                    <div class="cp-dialog-footer" style="padding:1rem 0 0;border-top:1px solid var(--border);margin:0 -1.5rem;padding:1rem 1.5rem 0;">
+                        <button type="button" class="btn btn-secondary" id="cancelMyProfile">Close</button>
+                        <button type="submit" class="btn btn-primary"><i data-lucide="save" class="icon-sm"></i> Save</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </dialog>
+    {% endif %}
+
+    <main class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flash-messages">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }}"><span>{{ message }}</span><button class="alert-close" onclick="this.parentElement.remove()"><i data-lucide="x" class="icon-sm"></i></button></div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        lucide.createIcons();
+        // Theme toggle (now inside profile dropdown)
+        const toggle=document.getElementById('themeToggle');
+        if(toggle)toggle.addEventListener('click',()=>{const h=document.documentElement,c=h.getAttribute('data-theme'),n=c==='dark'?'light':'dark';h.setAttribute('data-theme',n);localStorage.setItem('theme',n);lucide.createIcons();});
+        // Hamburger menu
+        const mb=document.getElementById('menuToggle'),nl=document.getElementById('navLinks');
+        if(mb&&nl){mb.addEventListener('click',()=>nl.classList.toggle('open'));nl.querySelectorAll('a').forEach(a=>a.addEventListener('click',()=>nl.classList.remove('open')));}
+        // Profile dropdown
+        const pt=document.getElementById('profileTrigger'),pd=document.getElementById('profileDropdown'),pw=document.getElementById('profileMenuWrap');
+        if(pt&&pd){
+            pt.addEventListener('click',(e)=>{e.stopPropagation();const open=pd.classList.toggle('open');pt.setAttribute('aria-expanded',open);});
+            document.addEventListener('click',(e)=>{if(pw&&!pw.contains(e.target)){pd.classList.remove('open');pt.setAttribute('aria-expanded','false');}});
+            pd.addEventListener('click',(e)=>{if(e.target.closest('.theme-switch-item')){e.stopPropagation();}});
+        }
+        // Change Password Dialog
+        const cpDialog=document.getElementById('changePasswordDialog');
+        const cpForm=document.getElementById('changePasswordForm');
+        const cpMsg=document.getElementById('cpMsg');
+        const openBtn=document.getElementById('openChangePassword');
+        const closeBtn=document.getElementById('closeChangePassword');
+        const cancelBtn=document.getElementById('cancelChangePassword');
+        function openCPDialog(){if(cpDialog){cpDialog.showModal();cpMsg.textContent='';cpMsg.className='cp-dialog-msg';cpForm.reset();lucide.createIcons();}}
+        function closeCPDialog(){if(cpDialog)cpDialog.close();}
+        if(openBtn)openBtn.addEventListener('click',openCPDialog);
+        if(closeBtn)closeBtn.addEventListener('click',closeCPDialog);
+        if(cancelBtn)cancelBtn.addEventListener('click',closeCPDialog);
+        if(cpDialog)cpDialog.addEventListener('click',(e)=>{if(e.target===cpDialog)closeCPDialog();});
+        if(cpForm)cpForm.addEventListener('submit',async(e)=>{
+            e.preventDefault();
+            const fd=new FormData(cpForm);
+            try{
+                const res=await fetch(cpForm.action,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}});
+                const data=await res.json();
+                cpMsg.textContent=data.message;
+                if(data.success){
+                    cpMsg.className='cp-dialog-msg cp-msg-success';
+                    setTimeout(()=>closeCPDialog(),1200);
+                }else{
+                    cpMsg.className='cp-dialog-msg cp-msg-error';
+                }
+            }catch(err){
+                cpMsg.textContent='Something went wrong.';
+                cpMsg.className='cp-dialog-msg cp-msg-error';
+            }
+        });
+        // My Profile Dialog
+        const profDialog=document.getElementById('myProfileDialog');
+        const profMsg=document.getElementById('profileMsg');
+        const openProfBtn=document.getElementById('openMyProfile');
+        const closeProfBtn=document.getElementById('closeMyProfile');
+        const cancelProfBtn=document.getElementById('cancelMyProfile');
+        const avatarForm=document.getElementById('avatarForm');
+        const avatarPreview=document.getElementById('profileAvatarPreview');
+        const picInput=document.getElementById('profilePicInput');
+        const picWrap=document.getElementById('profilePicWrap');
+        const removeBtn=document.getElementById('removeProfilePic');
+        function openProfDialog(){if(profDialog){profDialog.showModal();profMsg.textContent='';profMsg.className='cp-dialog-msg';lucide.createIcons();}}
+        function closeProfDialog(){if(profDialog)profDialog.close();}
+        if(openProfBtn)openProfBtn.addEventListener('click',openProfDialog);
+        if(closeProfBtn)closeProfBtn.addEventListener('click',closeProfDialog);
+        if(cancelProfBtn)cancelProfBtn.addEventListener('click',closeProfDialog);
+        if(profDialog)profDialog.addEventListener('click',(e)=>{if(e.target===profDialog)closeProfDialog();});
+        // Profile picture upload
+        if(picInput)picInput.addEventListener('change',async()=>{
+            const file=picInput.files[0];
+            if(!file)return;
+            const fd=new FormData();
+            fd.append('profile_pic',file);
+            try{
+                const res=await fetch('/profile/picture',{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}});
+                const data=await res.json();
+                profMsg.textContent=data.message;
+                if(data.success){
+                    profMsg.className='cp-dialog-msg cp-msg-success';
+                    // Update preview in dialog
+                    if(picWrap){
+                        const existing=picWrap.querySelector('.profile-pic-img, .avatar-large');
+                        if(existing)existing.remove();
+                        const img=document.createElement('img');
+                        img.src=data.pic_url+'?t='+Date.now();
+                        img.alt='Profile';img.className='profile-pic-img';img.id='profilePicImg';
+                        picWrap.prepend(img);
+                    }
+                    // Update nav avatars
+                    document.querySelectorAll('.nav-avatar').forEach(a=>{
+                        const img=document.createElement('img');
+                        img.src=data.pic_url+'?t='+Date.now();
+                        img.alt='';img.className='nav-avatar-img';
+                        if(a.parentNode.querySelector('.nav-avatar-img')){a.parentNode.querySelector('.nav-avatar-img').src=data.pic_url+'?t='+Date.now();}
+                        else{a.parentNode.insertBefore(img,a);a.style.display='none';}
+                    });
+                    // Show remove button
+                    if(!removeBtn){
+                        const btn=document.createElement('button');
+                        btn.type='button';btn.className='btn btn-sm btn-outline-danger';btn.id='removeProfilePic';
+                        btn.innerHTML='<i data-lucide="trash-2" class="icon-xs"></i> Remove';
+                        document.querySelector('.profile-pic-actions')?.appendChild(btn);
+                        btn.addEventListener('click',handleRemovePic);
+                        lucide.createIcons();
+                    }
+                }else{
+                    profMsg.className='cp-dialog-msg cp-msg-error';
+                }
+            }catch(err){profMsg.textContent='Upload failed.';profMsg.className='cp-dialog-msg cp-msg-error';}
+            picInput.value='';
+        });
+        // Remove profile pic
+        async function handleRemovePic(){
+            try{
+                const res=await fetch('/profile/picture/remove',{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'}});
+                const data=await res.json();
+                profMsg.textContent=data.message;
+                if(data.success){
+                    profMsg.className='cp-dialog-msg cp-msg-success';
+                    setTimeout(()=>location.reload(),800);
+                }else{profMsg.className='cp-dialog-msg cp-msg-error';}
+            }catch(err){profMsg.textContent='Something went wrong.';profMsg.className='cp-dialog-msg cp-msg-error';}
+        }
+        if(removeBtn)removeBtn.addEventListener('click',handleRemovePic);
+        // Live preview avatar color
+        if(avatarForm){
+            avatarForm.querySelectorAll('input[name="avatar_color"]').forEach(r=>{
+                r.addEventListener('change',()=>{if(avatarPreview)avatarPreview.style.background=r.value;});
+            });
+            avatarForm.addEventListener('submit',async(e)=>{
+                e.preventDefault();
+                const fd=new FormData(avatarForm);
+                try{
+                    const res=await fetch(avatarForm.action,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}});
+                    const data=await res.json();
+                    profMsg.textContent=data.message;
+                    if(data.success){
+                        profMsg.className='cp-dialog-msg cp-msg-success';
+                        const color=fd.get('avatar_color');
+                        document.querySelectorAll('.nav-avatar').forEach(a=>a.style.background=color);
+                        setTimeout(()=>closeProfDialog(),1000);
+                    }else{
+                        profMsg.className='cp-dialog-msg cp-msg-error';
+                    }
+                }catch(err){
+                    profMsg.textContent='Something went wrong.';
+                    profMsg.className='cp-dialog-msg cp-msg-error';
+                }
+            });
+        }
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

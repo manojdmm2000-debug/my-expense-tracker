@@ -1,0 +1,25 @@
+{% macro filter_bar(period, view_user_id, circle_members, user, is_overall, current_endpoint) %}
+<div class="filter-bar">
+    <div class="filter-group">
+        <label><i data-lucide="calendar" class="icon-xs"></i> Period</label>
+        <div class="period-pills">
+            {% for p, label in [('week','Week'),('month','Month'),('year','Year'),('all','All Time')] %}
+            <a href="?period={{ p }}&view_user={{ view_user_id }}" class="pill {% if period == p %}pill-active{% endif %}">{{ label }}</a>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="filter-group">
+        <label><i data-lucide="eye" class="icon-xs"></i> Viewing</label>
+        <select onchange="window.location.href='?period={{ period }}&view_user='+this.value" class="filter-select">
+            <option value="{{ user['id'] }}" {% if view_user_id == user['id'] %}selected{% endif %}>Myself</option>
+            {% if circle_members %}<option value="overall" {% if is_overall %}selected{% endif %}>🔗 Overall (Circle)</option>{% endif %}
+            {% for m in circle_members %}<option value="{{ m['id'] }}" {% if view_user_id == m['id'] %}selected{% endif %}>{{ m['display_name'] }}</option>{% endfor %}
+        </select>
+    </div>
+    {% if current_endpoint in ['expenses','income','investments'] %}
+    <div class="filter-group">
+        <a href="{{ url_for('export_csv', dtype=current_endpoint) }}" class="btn btn-sm btn-outline"><i data-lucide="download" class="icon-sm"></i> Export CSV</a>
+    </div>
+    {% endif %}
+</div>
+{% endmacro %}

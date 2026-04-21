@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Edit Expense – ExpenseTracker{% endblock %}
+{% block content %}
+<div class="page-header"><h1><i data-lucide="edit" class="icon"></i> Edit Expense</h1></div>
+<div class="card form-card">
+<form method="POST" action="{{ url_for('edit_expense', expense_id=expense['id']) }}">
+<div class="form-row">
+    <div class="form-group"><label>Category</label>
+        <select name="category_id" required>{% for c in categories %}<option value="{{ c['id'] }}" {% if c['id'] == expense['category_id'] %}selected{% endif %}>{{ c['name'] }}</option>{% endfor %}</select>
+    </div>
+    <div class="form-group"><label>Amount (₹)</label>
+        <input type="number" name="amount" step="0.01" min="0.01" required value="{{ expense['amount'] }}">
+    </div>
+    <div class="form-group"><label>Date</label>
+        <input type="date" name="expense_date" required value="{{ expense['expense_date'] }}">
+    </div>
+    <div class="form-group"><label>Recurrence</label>
+        <select name="recurrence">{% for r in recurrence_options %}<option value="{{ r }}" {% if expense['recurrence'] == r %}selected{% endif %}>{{ r|capitalize }}</option>{% endfor %}</select>
+    </div>
+    <div class="form-group flex-grow"><label>Description</label>
+        <input type="text" name="description" value="{{ expense['description'] or '' }}" placeholder="Optional note">
+    </div>
+</div>
+<div class="form-row" style="margin-top:.8rem; gap:.5rem;">
+    <button type="submit" class="btn btn-primary"><i data-lucide="save" class="icon-sm"></i> Save Changes</button>
+    <a href="{{ url_for('expenses') }}" class="btn btn-outline"><i data-lucide="x" class="icon-sm"></i> Cancel</a>
+</div>
+</form>
+</div>
+{% endblock %}
+{% block scripts %}<script>lucide.createIcons();</script>{% endblock %}

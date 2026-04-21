@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Budgets – ExpenseTracker{% endblock %}
+{% block content %}
+<div class="page-header"><h1><i data-lucide="pie-chart" class="icon"></i> Budget Limits</h1></div>
+
+<div class="card form-card"><h3><i data-lucide="plus-circle" class="icon-sm"></i> Set Budget Limit</h3>
+<form method="POST" action="{{ url_for('budgets') }}" class="inline-form">
+<div class="form-row">
+    <div class="form-group"><label>Category</label><select name="category_id" required><option value="">Select</option>{% for c in categories %}<option value="{{ c['id'] }}">{{ c['name'] }}</option>{% endfor %}</select></div>
+    <div class="form-group"><label>Monthly Limit (₹)</label><input type="number" name="monthly_limit" step="0.01" min="1" required placeholder="e.g. 5000"></div>
+    <div class="form-group form-action"><label>&nbsp;</label><button type="submit" class="btn btn-primary"><i data-lucide="save" class="icon-sm"></i> Save</button></div>
+</div></form></div>
+
+<div class="card"><h3><i data-lucide="bar-chart-3" class="icon-sm"></i> This Month's Budgets <span class="count-badge">{{ budgets|length }}</span></h3>
+{% if budgets %}
+<div class="budget-bars">
+{% for b in budgets %}
+{% set pct = (b['spent'] / b['monthly_limit'] * 100) if b['monthly_limit'] > 0 else 0 %}
+<div class="budget-item">
+    <div class="budget-header">
+        <span><strong>{{ b['category_name'] }}</strong></span>
+        <span>₹{{ "%.0f"|format(b['spent']) }} / ₹{{ "%.0f"|format(b['monthly_limit']) }} ({{ "%.0f"|format(pct) }}%)</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill {% if pct > 90 %}progress-danger{% elif pct > 70 %}progress-warning{% endif %}" style="width:{{ [pct,100]|min }}%"></div></div>
+    <form method="POST" action="{{ url_for('delete_budget', budget_id=b['id']) }}" class="budget-delete"><button type="submit" class="btn btn-sm btn-outline"><i data-lucide="trash-2" class="icon-xs"></i> Remove</button></form>
+</div>
+{% endfor %}
+</div>
+{% else %}<div class="empty-state"><i data-lucide="inbox" class="icon-lg empty-icon"></i><p>No budget limits set. Add one above to track spending against limits.</p></div>{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script>lucide.createIcons();</script>{% endblock %}

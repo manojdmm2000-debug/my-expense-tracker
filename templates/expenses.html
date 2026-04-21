@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "_filters.html" import filter_bar %}
+{% block title %}Expenses – ExpenseTracker{% endblock %}
+{% block content %}
+<div class="page-header"><h1><i data-lucide="receipt" class="icon"></i> Expenses</h1></div>
+
+{{ filter_bar(period, view_user_id, circle_members, user, is_overall, 'expenses') }}
+
+{% if is_overall %}
+<div class="viewing-banner banner-overall"><i data-lucide="link" class="icon-sm"></i> Combined expenses</div>
+{% elif viewed_user and view_user_id != user['id'] %}
+<div class="viewing-banner"><i data-lucide="eye" class="icon-sm"></i> Viewing <strong>{{ viewed_user['display_name'] }}</strong>'s expenses</div>
+{% endif %}
+
+{% if is_own %}
+<div class="card form-card"><h3><i data-lucide="plus-circle" class="icon-sm"></i> Add Expense</h3>
+<form method="POST" action="{{ url_for('add_expense') }}" class="inline-form">
+<div class="form-row">
+    <div class="form-group"><label>Category</label><select name="category_id" required><option value="">Select</option>{% for c in categories %}<option value="{{ c['id'] }}">{{ c['name'] }}</option>{% endfor %}</select></div>
+    <div class="form-group"><label>Amount (₹)</label><input type="number" name="amount" step="0.01" min="0.01" required placeholder="0.00"></div>
+    <div class="form-group"><label>Date</label><input type="date" name="expense_date" required></div>
+    <div class="form-group"><label>Recurrence</label><select name="recurrence">{% for r in recurrence_options %}<option value="{{ r }}">{{ r|capitalize }}</option>{% endfor %}</select></div>
+    <div class="form-group flex-grow"><label>Description</label><input type="text" name="description" placeholder="Optional note"></div>
+    <div class="form-group form-action"><label>&nbsp;</label><button type="submit" class="btn btn-primary"><i data-lucide="plus" class="icon-sm"></i> Add</button></div>
+</div></form></div>
+{% endif %}
+
+<div class="card"><h3>{% if is_overall %}All Circle Expenses{% elif is_own %}My Expenses{% else %}{{ viewed_user['display_name'] }}'s Expenses{% endif %} <span class="count-badge">{{ expenses|length }}</span></h3>
+{% if expenses %}
+<div class="table-responsive"><table class="data-table"><thead><tr><th>Date</th>{% if is_overall %}<th>User</th>{% endif %}<th>Category</th><th>Description</th><th>Recurrence</th><th>Amount</th>{% if is_own %}<th></th>{% endif %}</tr></thead>
+<tbody>{% for e in expenses %}<tr>
+<td>{{ e['expense_date'] }}</td>
+{% if is_overall %}<td class="text-muted">{{ e['owner_name'] }}</td>{% endif %}
+<td><span class="badge">{{ e['category_name'] }}</span></td>
+<td>{{ e['description'] or '–' }}</td>
+<td>{% if e['recurrence'] != 'none' %}<span class="badge badge-recurring"><i data-lucide="repeat" class="icon-xs"></i> {{ e['recurrence'] }}</span>{% else %}–{% endif %}</td>
+<td class="amount">₹{{ "%.2f"|format(e['amount']) }}</td>
+{% if is_own %}<td><div class="action-btns"><a href="{{ url_for('edit_expense', expense_id=e['id']) }}" class="btn btn-sm btn-outline"><i data-lucide="pencil" class="icon-xs"></i></a><form method="POST" action="{{ url_for('delete_expense', expense_id=e['id']) }}" onsubmit="return confirm('Delete?')" style="display:inline"><button type="submit" class="btn btn-sm btn-danger"><i data-lucide="trash-2" class="icon-xs"></i></button></form></div></td>{% endif %}
+</tr>{% endfor %}</tbody></table></div>
+{% else %}<div class="empty-state"><i data-lucide="inbox" class="icon-lg empty-icon"></i><p>No expenses found</p></div>{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script>
+document.querySelectorAll('input[type="date"]').forEach(i=>{if(!i.value)i.value=new Date().toISOString().split('T')[0]});
+lucide.createIcons();
+</script>{% endblock %}

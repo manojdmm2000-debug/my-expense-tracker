@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% from "_filters.html" import filter_bar %}
+{% block title %}Dashboard – ExpenseTracker{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1><i data-lucide="layout-dashboard" class="icon"></i> Dashboard</h1>
+</div>
+
+{{ filter_bar(period, view_user_id, circle_members, user, is_overall, 'dashboard') }}
+
+{% if is_overall %}
+<div class="viewing-banner banner-overall"><i data-lucide="link" class="icon-sm"></i> Combined data for you and all circle members</div>
+{% elif viewed_user and view_user_id != user['id'] %}
+<div class="viewing-banner"><i data-lucide="eye" class="icon-sm"></i> Viewing <strong>{{ viewed_user['display_name'] }}</strong>'s data</div>
+{% endif %}
+
+{% if insights %}
+<div class="insights-bar">
+    {% for ins in insights %}
+    <div class="insight insight-{{ ins.type }}"><i data-lucide="{{ ins.icon }}" class="icon-sm"></i> <span>{{ ins.msg }}</span></div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="stats-grid">
+    <div class="stat-card stat-income"><div class="stat-icon"><i data-lucide="banknote"></i></div><div><div class="stat-label">Income</div><div class="stat-value">₹{{ "%.2f"|format(total_income) }}</div></div></div>
+    <div class="stat-card stat-expense"><div class="stat-icon"><i data-lucide="receipt"></i></div><div><div class="stat-label">Expenses</div><div class="stat-value">₹{{ "%.2f"|format(total_expenses) }}</div></div></div>
+    <div class="stat-card stat-invest"><div class="stat-icon"><i data-lucide="trending-up"></i></div><div><div class="stat-label">Investments</div><div class="stat-value">₹{{ "%.2f"|format(total_investments) }}</div></div></div>
+    <div class="stat-card stat-net"><div class="stat-icon"><i data-lucide="wallet"></i></div><div><div class="stat-label">Net Savings</div><div class="stat-value {% if total_income - total_expenses >= 0 %}text-positive{% else %}text-negative{% endif %}">₹{{ "%.2f"|format(total_income - total_expenses) }}</div></div></div>
+</div>
+
+{% if budgets %}
+<div class="card"><h3><i data-lucide="pie-chart" class="icon-sm"></i> Budget Progress (This Month)</h3>
+<div class="budget-bars">
+{% for b in budgets %}
+{% set pct = (b['spent'] / b['monthly_limit'] * 100) if b['monthly_limit'] > 0 else 0 %}
+<div class="budget-item">
+    <div class="budget-header"><span>{{ b['name'] }}</span><span>₹{{ "%.0f"|format(b['spent']) }} / ₹{{ "%.0f"|format(b['monthly_limit']) }}</span></div>
+    <div class="progress-bar"><div class="progress-fill {% if pct > 90 %}progress-danger{% elif pct > 70 %}progress-warning{% endif %}" style="width:{{ [pct,100]|min }}%"></div></div>
+</div>
+{% endfor %}
+</div></div>
+{% endif %}
+
+<div class="charts-grid">
+    <div class="chart-card"><h3><i data-lucide="pie-chart" class="icon-sm"></i> Expenses by Category</h3>
+        {% if expense_data %}<canvas id="expenseChart"></canvas>{% else %}<div class="empty-state"><i data-lucide="inbox" class="icon-lg empty-icon"></i><p>No expenses yet</p></div>{% endif %}
+    </div>
+    <div class="chart-card"><h3><i data-lucide="bar-chart-3" class="icon-sm"></i> Income by Source</h3>
+        {% if income_data %}<canvas id="incomeChart"></canvas>{% else %}<div class="empty-state"><i data-lucide="inbox" class="icon-lg empty-icon"></i><p>No income yet</p></div>{% endif %}
+    </div>
+</div>
+
+<div class="card"><h3><i data-lucide="clock" class="icon-sm"></i> Recent Expenses</h3>
+{% if recent_expenses %}
+<div class="table-responsive"><table class="data-table"><thead><tr><th>Date</th>{% if is_overall %}<th>User</th>{% endif %}<th>Category</th><th>Description</th><th>Amount</th></tr></thead>
+<tbody>{% for e in recent_expenses %}<tr><td>{{ e['expense_date'] }}</td>{% if is_overall %}<td class="text-muted">{{ e['owner_name'] }}</td>{% endif %}<td><span class="badge">{{ e['category_name'] }}</span></td><td>{{ e['description'] or '–' }}</td><td class="amount">₹{{ "%.2f"|format(e['amount']) }}</td></tr>{% endfor %}</tbody></table></div>
+{% else %}<div class="empty-state"><p>No recent expenses</p></div>{% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const C=['#6366f1','#f43f5e','#10b981','#f59e0b','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f97316','#06b6d4','#84cc16','#e11d48'];
+const tc=()=>getComputedStyle(document.documentElement).getPropertyValue('--text').trim()||'#1e293b';
+{% if expense_data %}
+new Chart(document.getElementById('expenseChart'),{type:'doughnut',data:{labels:[{% for e in expense_data %}'{{e.name}}'{% if not loop.last %},{% endif %}{% endfor %}],datasets:[{data:[{% for e in expense_data %}{{e.total}}{% if not loop.last %},{% endif %}{% endfor %}],backgroundColor:C.slice(0,{{expense_data|length}}),borderWidth:0}]},options:{responsive:true,cutout:'60%',plugins:{legend:{position:'bottom',labels:{padding:14,usePointStyle:true,color:tc()}}}}});
+{% endif %}
+{% if income_data %}
+new Chart(document.getElementById('incomeChart'),{type:'doughnut',data:{labels:[{% for i in income_data %}'{{i.source}}'{% if not loop.last %},{% endif %}{% endfor %}],datasets:[{data:[{% for i in income_data %}{{i.total}}{% if not loop.last %},{% endif %}{% endfor %}],backgroundColor:C.slice(0,{{income_data|length}}),borderWidth:0}]},options:{responsive:true,cutout:'60%',plugins:{legend:{position:'bottom',labels:{padding:14,usePointStyle:true,color:tc()}}}}});
+{% endif %}
+lucide.createIcons();
+</script>
+{% endblock %}

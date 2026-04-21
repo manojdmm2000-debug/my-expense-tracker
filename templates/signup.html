@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Sign Up – ExpenseTracker{% endblock %}
+{% block content %}
+<div class="auth-container">
+    <div class="auth-card">
+        <div class="auth-brand"><i data-lucide="wallet" class="icon-lg"></i></div>
+        <h1>Create Account</h1>
+        <h2>Start tracking your finances</h2>
+        <form method="POST" action="{{ url_for('signup') }}">
+            <div class="form-group">
+                <label><i data-lucide="user" class="icon-xs"></i> Username</label>
+                <input type="text" name="username" required autofocus placeholder="Choose a unique username" minlength="3">
+            </div>
+            <div class="form-group">
+                <label><i data-lucide="smile" class="icon-xs"></i> Display Name</label>
+                <input type="text" name="display_name" required placeholder="Your full name">
+            </div>
+            <div class="form-group">
+                <label><i data-lucide="lock" class="icon-xs"></i> Password</label>
+                <input type="password" name="password" required placeholder="At least 6 characters" minlength="6">
+            </div>
+            <div class="form-group">
+                <label><i data-lucide="lock" class="icon-xs"></i> Confirm Password</label>
+                <input type="password" name="confirm_password" required placeholder="Re-enter password">
+            </div>
+            <div class="form-divider"><span>Password Recovery</span></div>
+            <div class="form-group">
+                <label><i data-lucide="shield-question" class="icon-xs"></i> Security Question</label>
+                <select name="security_question" required>
+                    <option value="">Select a question</option>
+                    {% for q in security_questions %}<option value="{{ q }}">{{ q }}</option>{% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label><i data-lucide="message-circle" class="icon-xs"></i> Your Answer</label>
+                <input type="text" name="security_answer" required placeholder="Case-insensitive answer">
+            </div>
+            <button type="submit" class="btn btn-primary btn-full"><i data-lucide="user-plus" class="icon-sm"></i> Sign Up</button>
+        </form>
+        <p class="auth-link">Already have an account? <a href="{{ url_for('signin') }}">Sign In</a></p>
+    </div>
+</div>
+{% endblock %}

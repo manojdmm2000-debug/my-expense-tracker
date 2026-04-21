@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+expenses.db
+expenses.db-shm
+expenses.db-wal
+static/uploads/
+.DS_Store

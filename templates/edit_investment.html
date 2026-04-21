@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Edit Investment – ExpenseTracker{% endblock %}
+{% block content %}
+<div class="page-header"><h1><i data-lucide="edit" class="icon"></i> Edit Investment</h1></div>
+<div class="card form-card">
+<form method="POST" action="{{ url_for('edit_investment', inv_id=investment['id']) }}">
+<div class="form-row">
+    <div class="form-group"><label>Type</label>
+        <select name="type" required>{% for t in investment_types %}<option value="{{ t }}" {% if investment['type'] == t %}selected{% endif %}>{{ t }}</option>{% endfor %}</select>
+    </div>
+    <div class="form-group"><label>Amount (₹)</label>
+        <input type="number" name="amount" step="0.01" min="0.01" required value="{{ investment['amount'] }}">
+    </div>
+    <div class="form-group"><label>Date</label>
+        <input type="date" name="invest_date" required value="{{ investment['invest_date'] }}">
+    </div>
+    <div class="form-group flex-grow"><label>Description</label>
+        <input type="text" name="description" value="{{ investment['description'] or '' }}" placeholder="Optional note">
+    </div>
+</div>
+<div class="form-row" style="margin-top:.8rem; gap:.5rem;">
+    <button type="submit" class="btn btn-primary"><i data-lucide="save" class="icon-sm"></i> Save Changes</button>
+    <a href="{{ url_for('investments') }}" class="btn btn-outline"><i data-lucide="x" class="icon-sm"></i> Cancel</a>
+</div>
+</form>
+</div>
+{% endblock %}
+{% block scripts %}<script>lucide.createIcons();</script>{% endblock %}
