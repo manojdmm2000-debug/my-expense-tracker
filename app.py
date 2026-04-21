@@ -111,8 +111,8 @@ def ensure_categories():
     global _categories_seeded
     if _categories_seeded:
         return
-    existing = zcql_query("SELECT name FROM categories WHERE is_default = '1'")
-    existing_names = {r["name"] for r in (existing or [])}
+    existing = fetchall("SELECT name FROM categories WHERE is_default = '1'")
+    existing_names = {r["name"] for r in existing}
     tbl = ds_table("categories")
     for cat in DEFAULT_CATEGORIES:
         if cat not in existing_names:
@@ -435,7 +435,7 @@ def dashboard():
     budgets = []
     for b in raw_budgets:
         cat_name = b.get("category_name", "")
-        spent_rows = zcql_query(f"SELECT SUM(amount) as spent FROM expenses WHERE user_id = '{qstr(buid)}' AND category_name = '{qstr(cat_name)}' AND expense_date BETWEEN '{ms}' AND '{me}'")
+        spent_rows = fetchall(f"SELECT SUM(amount) as spent FROM expenses WHERE user_id = '{qstr(buid)}' AND category_name = '{qstr(cat_name)}' AND expense_date BETWEEN '{ms}' AND '{me}'")
         spent = fnum(spent_rows[0].get("spent") if spent_rows else 0)
         budgets.append({**b, "name": cat_name, "monthly_limit": fnum(b.get("monthly_limit")), "spent": spent})
 
@@ -774,7 +774,7 @@ def budgets():
     budget_list = []
     for b in raw_budgets:
         cat_name = b.get("category_name", "")
-        spent_rows = zcql_query(f"SELECT SUM(amount) as spent FROM expenses WHERE user_id = '{qstr(uid)}' AND category_name = '{qstr(cat_name)}' AND expense_date BETWEEN '{ms}' AND '{me}'")
+        spent_rows = fetchall(f"SELECT SUM(amount) as spent FROM expenses WHERE user_id = '{qstr(uid)}' AND category_name = '{qstr(cat_name)}' AND expense_date BETWEEN '{ms}' AND '{me}'")
         spent = fnum(spent_rows[0].get("spent") if spent_rows else 0)
         budget_list.append({**b, "name": cat_name, "monthly_limit": fnum(b.get("monthly_limit")), "spent": spent})
 
