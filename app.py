@@ -78,10 +78,17 @@ def normalize(row):
     if row is None:
         return None
     d = dict(row)
-    rowid = d.get("ROWID") or d.get("rowid")
+    # ZCQL wraps each row as {table_name: {col: val, ...}} — unwrap it
+    if len(d) == 1:
+        inner = list(d.values())[0]
+        if isinstance(inner, dict):
+            d = inner
+    # Normalize all keys to lowercase for consistent access
+    d = {k.lower(): v for k, v in d.items()}
+    rowid = d.get("rowid")
     if rowid is not None:
-        d["ROWID"] = rowid
-        d["id"] = rowid
+        d["ROWID"] = str(rowid)
+        d["id"] = str(rowid)
     return d
 
 
