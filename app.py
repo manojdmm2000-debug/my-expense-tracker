@@ -1005,6 +1005,31 @@ def debug_users():
     })
 
 
+@app.route("/debug/zcql")
+def debug_zcql():
+    import traceback
+    results = {}
+    queries = {
+        "users_all": "SELECT * FROM users LIMIT 2",
+        "expenses_sum": "SELECT SUM(amount) as total FROM expenses LIMIT 1",
+        "expenses_group": "SELECT category_name, SUM(amount) FROM expenses GROUP BY category_name LIMIT 3",
+        "expenses_alias": "SELECT category_name as name, SUM(amount) as total FROM expenses GROUP BY category_name LIMIT 3",
+    }
+    for key, q in queries.items():
+        try:
+            raw = zcql_query(q)
+            results[key] = {"raw": raw, "normalized": normalize_all(raw)}
+        except Exception as e:
+            results[key] = {"error": str(e), "traceback": traceback.format_exc()}
+    return jsonify(results)
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
 # ── Startup ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
