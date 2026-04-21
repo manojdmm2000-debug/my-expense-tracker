@@ -1,36 +1,24 @@
 import os
 import io
 import csv
-import secrets
 import random
 from datetime import datetime, date, timedelta
 from functools import wraps
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    session, flash, g, jsonify, Response, send_from_directory
+    session, flash, g, jsonify, Response
 )
 import bcrypt
+import zcatalyst_sdk
 from werkzeug.utils import secure_filename
-
-# ── Database engine detection ─────────────────────────────────────
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-IS_PG = DATABASE_URL.startswith("postgres")
-
-if IS_PG:
-    import psycopg2
-    import psycopg2.extras
-else:
-    import sqlite3
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "expense-tracker-dev-key-do-not-use-in-prod")
 
 UPLOAD_FOLDER = os.path.join(app.static_folder, "uploads")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2MB max
-
-DATABASE = os.environ.get("DATABASE_PATH", "expenses.db")
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
 DEFAULT_CATEGORIES = [
     "Entertainment", "Food & Dining", "Health", "Home Rental",
@@ -64,223 +52,74 @@ AVATAR_COLORS = [
 
 RECURRENCE_OPTIONS = ["none", "weekly", "monthly", "yearly"]
 
-# ── Database ─────────────────────────────────────────────────────
+_categories_seeded = False
 
-class Database:
-    """Thin wrapper providing a unified API for PostgreSQL and SQLite."""
-    def __init__(self, conn, is_pg=False):
-        self.conn = conn
-        self.is_pg = is_pg
+# ── Catalyst DataStore helpers ────────────────────────────────────
 
-    def execute(self, query, params=None):
-        if self.is_pg:
-            cur = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-            cur.execute(query, params or ())
-            return cur
-        else:
-            query = query.replace('%s', '?')
-            return self.conn.execute(query, params or ())
-
-    def commit(self):
-        self.conn.commit()
-
-    def rollback(self):
-        self.conn.rollback()
-
-    def close(self):
-        self.conn.close()
+def get_catalyst():
+    if "catalyst" not in g:
+        g.catalyst = zcatalyst_sdk.initialize(req=request)
+    return g.catalyst
 
 
-def get_db():
-    if "db" not in g:
-        if IS_PG:
-            conn = psycopg2.connect(DATABASE_URL)
-            g.db = Database(conn, is_pg=True)
-        else:
-            conn = sqlite3.connect(DATABASE, timeout=20)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA foreign_keys=ON")
-            g.db = Database(conn, is_pg=False)
-    return g.db
+def ds_table(name):
+    return get_catalyst().datastore().table(name)
 
 
-@app.teardown_appcontext
-def close_db(exc):
-    db = g.pop("db", None)
-    if db:
-        if exc is None:
-            try:
-                db.commit()
-            except Exception:
-                pass
-        db.close()
+def zcql_query(query):
+    return get_catalyst().zcql().execute_query(query)
 
 
-def init_db():
-    if IS_PG:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
-            display_name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            avatar_color TEXT DEFAULT '#6366f1',
-            profile_pic TEXT DEFAULT NULL,
-            security_question TEXT,
-            security_answer_hash TEXT,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS categories (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            is_default INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS budgets (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            category_id INTEGER NOT NULL REFERENCES categories(id),
-            monthly_limit NUMERIC(12,2) NOT NULL,
-            UNIQUE(user_id, category_id)
-        );
-        CREATE TABLE IF NOT EXISTS expenses (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            category_id INTEGER NOT NULL REFERENCES categories(id),
-            amount NUMERIC(12,2) NOT NULL,
-            description TEXT,
-            expense_date DATE NOT NULL,
-            recurrence TEXT DEFAULT 'none',
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS income (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            source TEXT NOT NULL,
-            amount NUMERIC(12,2) NOT NULL,
-            description TEXT,
-            income_date DATE NOT NULL,
-            recurrence TEXT DEFAULT 'none',
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS investments (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            type TEXT NOT NULL,
-            amount NUMERIC(12,2) NOT NULL,
-            description TEXT,
-            invest_date DATE NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS circles (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            friend_id INTEGER NOT NULL REFERENCES users(id),
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT NOW(),
-            UNIQUE(user_id, friend_id)
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username));
-        """)
-        conn.commit()
-        # Seed default categories
-        cur.execute("SELECT COUNT(*) FROM categories WHERE is_default=1")
-        if cur.fetchone()[0] == 0:
-            for cat in DEFAULT_CATEGORIES:
-                cur.execute("INSERT INTO categories (name, is_default) VALUES (%s, 1)", (cat,))
-            conn.commit()
-        # Migration: add profile_pic column if missing
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='profile_pic'")
-        if not cur.fetchone():
-            cur.execute("ALTER TABLE users ADD COLUMN profile_pic TEXT DEFAULT NULL")
-            conn.commit()
-        cur.close()
-        conn.close()
-    else:
-        conn = sqlite3.connect(DATABASE, timeout=20)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            display_name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            avatar_color TEXT DEFAULT '#6366f1',
-            profile_pic TEXT DEFAULT NULL,
-            security_question TEXT,
-            security_answer_hash TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            is_default INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS budgets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            category_id INTEGER NOT NULL REFERENCES categories(id),
-            monthly_limit REAL NOT NULL,
-            UNIQUE(user_id, category_id)
-        );
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            category_id INTEGER NOT NULL REFERENCES categories(id),
-            amount REAL NOT NULL,
-            description TEXT,
-            expense_date TEXT NOT NULL,
-            recurrence TEXT DEFAULT 'none',
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS income (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            source TEXT NOT NULL,
-            amount REAL NOT NULL,
-            description TEXT,
-            income_date TEXT NOT NULL,
-            recurrence TEXT DEFAULT 'none',
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS investments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            type TEXT NOT NULL,
-            amount REAL NOT NULL,
-            description TEXT,
-            invest_date TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS circles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
-            friend_id INTEGER NOT NULL REFERENCES users(id),
-            status TEXT DEFAULT 'pending',
-            created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(user_id, friend_id)
-        );
-        """)
-        for cat in DEFAULT_CATEGORIES:
-            existing = conn.execute("SELECT id FROM categories WHERE name=? AND is_default=1", (cat,)).fetchone()
-            if not existing:
-                conn.execute("INSERT INTO categories (name, is_default) VALUES (?, 1)", (cat,))
-        conn.commit()
-        # Migration: add profile_pic column if missing
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-        if "profile_pic" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN profile_pic TEXT DEFAULT NULL")
-            conn.commit()
-        conn.close()
+def qstr(val):
+    return str(val).replace("'", "''")
 
-# ── Helpers ──────────────────────────────────────────────────────
+
+def normalize(row):
+    if row is None:
+        return None
+    d = dict(row)
+    rowid = d.get("ROWID") or d.get("rowid")
+    if rowid is not None:
+        d["ROWID"] = rowid
+        d["id"] = rowid
+    return d
+
+
+def normalize_all(rows):
+    return [normalize(r) for r in (rows or [])]
+
+
+def fetchone(query):
+    rows = zcql_query(query)
+    return normalize(rows[0]) if rows else None
+
+
+def fetchall(query):
+    return normalize_all(zcql_query(query))
+
+
+# ── Category seeding ──────────────────────────────────────────────
+
+def ensure_categories():
+    global _categories_seeded
+    if _categories_seeded:
+        return
+    existing = zcql_query("SELECT name FROM categories WHERE is_default = '1'")
+    existing_names = {r["name"] for r in (existing or [])}
+    tbl = ds_table("categories")
+    for cat in DEFAULT_CATEGORIES:
+        if cat not in existing_names:
+            tbl.insert_row({"name": cat, "is_default": "1"})
+    _categories_seeded = True
+
+
+@app.before_request
+def before_request_hook():
+    if request.endpoint and not request.endpoint.startswith("static"):
+        ensure_categories()
+
+
+# ── Date helpers ──────────────────────────────────────────────────
 
 def get_date_range(period):
     today = date.today()
@@ -295,35 +134,40 @@ def get_date_range(period):
         return today.replace(month=1, day=1).isoformat(), today.replace(month=12, day=31).isoformat()
     return None, None
 
-def period_clause(col, period):
+
+def date_clause(col, period):
     s, e = get_date_range(period)
     if s and e:
-        return f" AND {col} BETWEEN %s AND %s", [s, e]
-    return "", []
+        return f" AND {col} BETWEEN '{s}' AND '{e}'"
+    return ""
+
 
 def generate_insights(expense_data, invest_data, tot_exp, tot_inv, tot_inc=0):
     insights = []
     if tot_inc > 0 and tot_exp > 0:
         sr = (tot_inc - tot_exp) / tot_inc * 100
         if sr >= 30:
-            insights.append({"type":"success","icon":"trending-up","msg":f"Excellent! Saving {sr:.0f}% of income."})
+            insights.append({"type": "success", "icon": "trending-up", "msg": f"Excellent! Saving {sr:.0f}% of income."})
         elif sr >= 10:
-            insights.append({"type":"info","icon":"piggy-bank","msg":f"Saving {sr:.0f}% — aim for 20%+."})
+            insights.append({"type": "info", "icon": "piggy-bank", "msg": f"Saving {sr:.0f}% — aim for 20%+."})
         elif sr > 0:
-            insights.append({"type":"warning","icon":"alert-triangle","msg":f"Only {sr:.0f}% savings. Cut discretionary spending."})
+            insights.append({"type": "warning", "icon": "alert-triangle", "msg": f"Only {sr:.0f}% savings. Cut discretionary spending."})
         else:
-            insights.append({"type":"warning","icon":"alert-circle","msg":"Spending exceeds income this period!"})
+            insights.append({"type": "warning", "icon": "alert-circle", "msg": "Spending exceeds income this period!"})
     if tot_inv > 0 and tot_exp > 0 and tot_inv / tot_exp >= 0.5:
-        insights.append({"type":"success","icon":"rocket","msg":"Great investment allocation!"})
+        insights.append({"type": "success", "icon": "rocket", "msg": "Great investment allocation!"})
     emap = {r["name"]: r["total"] for r in expense_data} if expense_data else {}
     disc = emap.get("Entertainment", 0) + emap.get("Food & Dining", 0) + emap.get("Shopping", 0)
     if tot_exp > 0 and disc / tot_exp > 0.5:
-        insights.append({"type":"warning","icon":"shopping-cart","msg":f"Discretionary spending is {disc/tot_exp*100:.0f}%. Set budget limits."})
+        insights.append({"type": "warning", "icon": "shopping-cart", "msg": f"Discretionary spending is {disc/tot_exp*100:.0f}%. Set budget limits."})
     if not insights and tot_exp > 0:
-        insights.append({"type":"success","icon":"check-circle","msg":"Spending looks balanced!"})
+        insights.append({"type": "success", "icon": "check-circle", "msg": "Spending looks balanced!"})
     if not insights:
-        insights.append({"type":"info","icon":"info","msg":"Add transactions to get insights."})
+        insights.append({"type": "info", "icon": "info", "msg": "Add transactions to get insights."})
     return insights
+
+
+# ── Auth helpers ──────────────────────────────────────────────────
 
 def login_required(f):
     @wraps(f)
@@ -339,82 +183,114 @@ def login_required(f):
         return f(*a, **kw)
     return wrapper
 
+
 def current_user():
     if "user_id" in session:
-        return get_db().execute("SELECT * FROM users WHERE id=%s", (session["user_id"],)).fetchone()
+        return fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(session['user_id'])}'")
     return None
 
+
 def get_circle_member_ids(uid):
-    rows = get_db().execute(
-        "SELECT friend_id FROM circles WHERE user_id=%s AND status='accepted' UNION SELECT user_id FROM circles WHERE friend_id=%s AND status='accepted'",
-        (uid, uid)).fetchall()
-    return [uid] + [r[0] for r in rows]
+    sent = fetchall(f"SELECT friend_id FROM circles WHERE user_id = '{qstr(uid)}' AND status = 'accepted'")
+    received = fetchall(f"SELECT user_id FROM circles WHERE friend_id = '{qstr(uid)}' AND status = 'accepted'")
+    ids = [str(uid)]
+    ids += [str(r["friend_id"]) for r in sent]
+    ids += [str(r["user_id"]) for r in received]
+    return list(set(ids))
+
 
 def get_circle_members(uid):
-    return get_db().execute("""
-        SELECT u.* FROM users u WHERE u.id IN (
-            SELECT friend_id FROM circles WHERE user_id=%s AND status='accepted'
-            UNION SELECT user_id FROM circles WHERE friend_id=%s AND status='accepted'
-        ) AND u.id != %s""", (uid, uid, uid)).fetchall()
+    member_ids = [m for m in get_circle_member_ids(uid) if str(m) != str(uid)]
+    if not member_ids:
+        return []
+    in_clause = ",".join([f"'{qstr(m)}'" for m in member_ids])
+    return fetchall(f"SELECT * FROM users WHERE ROWID IN ({in_clause})")
+
 
 def can_view_user(viewer, target):
-    return viewer == target or target in get_circle_member_ids(viewer)
+    return str(viewer) == str(target) or str(target) in get_circle_member_ids(viewer)
+
 
 def resolve_view(uid):
     v = request.args.get("view_user", str(uid))
     if v == "overall":
         return "overall", True
-    try:
-        return int(v), False
-    except ValueError:
-        return uid, False
+    return v, False
 
-# ── Auth ─────────────────────────────────────────────────────────
+
+def uid_name_map(uid, circle):
+    m = {str(uid): session.get("display_name", "Me")}
+    for c in circle:
+        m[str(c["ROWID"])] = c["display_name"]
+    return m
+
+
+def fnum(val):
+    try:
+        return float(val or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# ── Auth routes ───────────────────────────────────────────────────
 
 @app.route("/")
 def index():
     return redirect(url_for("dashboard") if "user_id" in session else url_for("signin"))
 
-@app.route("/signup", methods=["GET","POST"])
+
+@app.route("/signup", methods=["GET", "POST"])
 def signup():
     if request.method == "POST":
-        u = request.form.get("username","").strip()
-        dn = request.form.get("display_name","").strip()
-        pw = request.form.get("password","")
-        c = request.form.get("confirm_password","")
-        sq = request.form.get("security_question","")
-        sa = request.form.get("security_answer","").strip()
+        u = request.form.get("username", "").strip()
+        dn = request.form.get("display_name", "").strip()
+        pw = request.form.get("password", "")
+        c = request.form.get("confirm_password", "")
+        sq = request.form.get("security_question", "")
+        sa = request.form.get("security_answer", "").strip()
         errs = []
-        if not u or not dn or not pw: errs.append("All fields required.")
-        if len(u) < 3: errs.append("Username ≥ 3 chars.")
-        if pw != c: errs.append("Passwords don't match.")
-        if len(pw) < 6: errs.append("Password ≥ 6 chars.")
-        if not sq or not sa: errs.append("Security question required.")
+        if not u or not dn or not pw:
+            errs.append("All fields required.")
+        if len(u) < 3:
+            errs.append("Username ≥ 3 chars.")
+        if pw != c:
+            errs.append("Passwords don't match.")
+        if len(pw) < 6:
+            errs.append("Password ≥ 6 chars.")
+        if not sq or not sa:
+            errs.append("Security question required.")
         if errs:
-            for e in errs: flash(e, "danger")
+            for e in errs:
+                flash(e, "danger")
             return render_template("signup.html", security_questions=SECURITY_QUESTIONS)
-        db = get_db()
-        if db.execute("SELECT id FROM users WHERE username=%s", (u,)).fetchone():
+        if fetchone(f"SELECT ROWID FROM users WHERE username = '{qstr(u)}'"):
             flash("Username taken.", "danger")
             return render_template("signup.html", security_questions=SECURITY_QUESTIONS)
         ph = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
         ah = bcrypt.hashpw(sa.lower().encode(), bcrypt.gensalt()).decode()
-        db.execute("INSERT INTO users (username,display_name,password_hash,avatar_color,security_question,security_answer_hash) VALUES (%s,%s,%s,%s,%s,%s)",
-                   (u, dn, ph, random.choice(AVATAR_COLORS), sq, ah))
-        db.commit()
+        ds_table("users").insert_row({
+            "username": u,
+            "display_name": dn,
+            "password_hash": ph,
+            "avatar_color": random.choice(AVATAR_COLORS),
+            "profile_pic": "",
+            "security_question": sq,
+            "security_answer_hash": ah,
+            "created_at": datetime.now().isoformat(),
+        })
         flash("Account created! Sign in.", "success")
         return redirect(url_for("signin"))
     return render_template("signup.html", security_questions=SECURITY_QUESTIONS)
 
-@app.route("/signin", methods=["GET","POST"])
+
+@app.route("/signin", methods=["GET", "POST"])
 def signin():
     if request.method == "POST":
-        u = request.form.get("username","").strip()
-        pw = request.form.get("password","")
-        db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username=%s", (u,)).fetchone()
+        u = request.form.get("username", "").strip()
+        pw = request.form.get("password", "")
+        user = fetchone(f"SELECT * FROM users WHERE username = '{qstr(u)}'")
         if user and bcrypt.checkpw(pw.encode(), user["password_hash"].encode()):
-            session["user_id"] = user["id"]
+            session["user_id"] = user["ROWID"]
             session["username"] = user["username"]
             session["display_name"] = user["display_name"]
             flash(f"Welcome, {user['display_name']}!", "success")
@@ -422,87 +298,93 @@ def signin():
         flash("Invalid username or password.", "danger")
     return render_template("signin.html")
 
+
 @app.route("/signout")
 def signout():
     session.clear()
     flash("Signed out.", "info")
     return redirect(url_for("signin"))
 
-@app.route("/forgot-password", methods=["GET","POST"])
+
+@app.route("/forgot-password", methods=["GET", "POST"])
 def forgot_password():
     step = request.form.get("step", "1")
     if request.method == "POST" and step == "1":
-        u = request.form.get("username","").strip()
-        db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username=%s", (u,)).fetchone()
-        if not user or not user["security_question"]:
+        u = request.form.get("username", "").strip()
+        user = fetchone(f"SELECT * FROM users WHERE username = '{qstr(u)}'")
+        if not user or not user.get("security_question"):
             flash("Username not found.", "danger")
             return render_template("forgot_password.html", step=1)
         return render_template("forgot_password.html", step=2, username=u, security_question=user["security_question"])
     elif request.method == "POST" and step == "2":
-        u = request.form.get("username","").strip()
-        a = request.form.get("security_answer","").strip()
-        db = get_db()
-        user = db.execute("SELECT * FROM users WHERE username=%s", (u,)).fetchone()
+        u = request.form.get("username", "").strip()
+        a = request.form.get("security_answer", "").strip()
+        user = fetchone(f"SELECT * FROM users WHERE username = '{qstr(u)}'")
         if not user or not bcrypt.checkpw(a.lower().encode(), user["security_answer_hash"].encode()):
             flash("Incorrect answer.", "danger")
-            return render_template("forgot_password.html", step=2, username=u, security_question=user["security_question"] if user else "")
+            return render_template("forgot_password.html", step=2, username=u,
+                                   security_question=user["security_question"] if user else "")
         return render_template("forgot_password.html", step=3, username=u)
     elif request.method == "POST" and step == "3":
-        u = request.form.get("username","").strip()
-        np = request.form.get("new_password","")
-        c = request.form.get("confirm_password","")
+        u = request.form.get("username", "").strip()
+        np = request.form.get("new_password", "")
+        c = request.form.get("confirm_password", "")
         if len(np) < 6:
             flash("Password ≥ 6 chars.", "danger")
             return render_template("forgot_password.html", step=3, username=u)
         if np != c:
             flash("Passwords don't match.", "danger")
             return render_template("forgot_password.html", step=3, username=u)
-        db = get_db()
-        db.execute("UPDATE users SET password_hash=%s WHERE username=%s",
-                   (bcrypt.hashpw(np.encode(), bcrypt.gensalt()).decode(), u))
-        db.commit()
+        user = fetchone(f"SELECT ROWID FROM users WHERE username = '{qstr(u)}'")
+        if user:
+            ds_table("users").update_row({
+                "ROWID": user["ROWID"],
+                "password_hash": bcrypt.hashpw(np.encode(), bcrypt.gensalt()).decode(),
+            })
         flash("Password reset! Sign in.", "success")
         return redirect(url_for("signin"))
     return render_template("forgot_password.html", step=1)
 
-# ── Change Password (logged-in) ──────────────────────────────────
 
-@app.route("/change-password", methods=["GET","POST"])
+@app.route("/change-password", methods=["GET", "POST"])
 @login_required
 def change_password():
     if request.method == "POST":
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        current = request.form.get("current_password","")
-        new_pw = request.form.get("new_password","")
-        confirm = request.form.get("confirm_password","")
-        db = get_db()
-        user = db.execute("SELECT * FROM users WHERE id=%s", (session["user_id"],)).fetchone()
+        current = request.form.get("current_password", "")
+        new_pw = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        user = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(session['user_id'])}'")
         if not user or not bcrypt.checkpw(current.encode(), user["password_hash"].encode()):
+            msg = "Current password is incorrect."
             if is_ajax:
-                return jsonify(success=False, message="Current password is incorrect."), 200
-            flash("Current password is incorrect.", "danger")
+                return jsonify(success=False, message=msg), 200
+            flash(msg, "danger")
             return render_template("change_password.html", user=current_user())
         if len(new_pw) < 6:
+            msg = "New password must be at least 6 characters."
             if is_ajax:
-                return jsonify(success=False, message="New password must be at least 6 characters."), 200
-            flash("New password must be at least 6 characters.", "danger")
+                return jsonify(success=False, message=msg), 200
+            flash(msg, "danger")
             return render_template("change_password.html", user=current_user())
         if new_pw != confirm:
+            msg = "Passwords do not match."
             if is_ajax:
-                return jsonify(success=False, message="Passwords do not match."), 200
-            flash("Passwords do not match.", "danger")
+                return jsonify(success=False, message=msg), 200
+            flash(msg, "danger")
             return render_template("change_password.html", user=current_user())
-        db.execute("UPDATE users SET password_hash=%s WHERE id=%s",
-                   (bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode(), session["user_id"]))
-        db.commit()
+        ds_table("users").update_row({
+            "ROWID": session["user_id"],
+            "password_hash": bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode(),
+        })
         if is_ajax:
             return jsonify(success=True, message="Password changed successfully!"), 200
         flash("Password changed successfully!", "success")
         return redirect(url_for("dashboard"))
     return render_template("change_password.html", user=current_user())
 
-# ── Dashboard ────────────────────────────────────────────────────
+
+# ── Dashboard ─────────────────────────────────────────────────────
 
 @app.route("/dashboard")
 @login_required
@@ -510,36 +392,46 @@ def dashboard():
     uid = session["user_id"]
     vid, is_all = resolve_view(uid)
     period = request.args.get("period", "month")
-    db = get_db()
     circle = get_circle_members(uid)
-    pe, pp_e = period_clause("e.expense_date", period)
-    pi_, pp_i = period_clause("i.invest_date", period)
-    pinc, pp_inc = period_clause("inc.income_date", period)
+    dc_e = date_clause("expense_date", period)
+    dc_i = date_clause("invest_date", period)
+    dc_inc = date_clause("income_date", period)
 
     if is_all:
         ids = get_circle_member_ids(uid)
-        ph = ",".join(["%s"]*len(ids))
-        exp = db.execute(f"SELECT c.name, SUM(e.amount) as total FROM expenses e JOIN categories c ON e.category_id=c.id WHERE e.user_id IN ({ph}){pe} GROUP BY c.name ORDER BY total DESC", ids+pp_e).fetchall()
-        inv = db.execute(f"SELECT i.type, SUM(i.amount) as total FROM investments i WHERE i.user_id IN ({ph}){pi_} GROUP BY i.type ORDER BY total DESC", ids+pp_i).fetchall()
-        inc = db.execute(f"SELECT inc.source, SUM(inc.amount) as total FROM income inc WHERE inc.user_id IN ({ph}){pinc} GROUP BY inc.source ORDER BY total DESC", ids+pp_inc).fetchall()
-        recent = db.execute(f"SELECT e.*, c.name as category_name, u.display_name as owner_name FROM expenses e JOIN categories c ON e.category_id=c.id JOIN users u ON e.user_id=u.id WHERE e.user_id IN ({ph}){pe} ORDER BY e.expense_date DESC LIMIT 8", ids+pp_e).fetchall()
+        in_ids = ",".join([f"'{qstr(i)}'" for i in ids])
+        exp = fetchall(f"SELECT category_name as name, SUM(amount) as total FROM expenses WHERE user_id IN ({in_ids}){dc_e} GROUP BY category_name ORDER BY total DESC")
+        inv = fetchall(f"SELECT type, SUM(amount) as total FROM investments WHERE user_id IN ({in_ids}){dc_i} GROUP BY type ORDER BY total DESC")
+        inc = fetchall(f"SELECT source, SUM(amount) as total FROM income WHERE user_id IN ({in_ids}){dc_inc} GROUP BY source ORDER BY total DESC")
+        recent = fetchall(f"SELECT * FROM expenses WHERE user_id IN ({in_ids}){dc_e} ORDER BY expense_date DESC LIMIT 8")
+        nm = uid_name_map(uid, circle)
+        for r in recent:
+            r["owner_name"] = nm.get(str(r.get("user_id")), "Unknown")
         vu = None
     else:
         if not can_view_user(uid, vid):
             flash("Access denied.", "danger")
             return redirect(url_for("dashboard"))
-        exp = db.execute(f"SELECT c.name, SUM(e.amount) as total FROM expenses e JOIN categories c ON e.category_id=c.id WHERE e.user_id=%s{pe} GROUP BY c.name ORDER BY total DESC", [vid]+pp_e).fetchall()
-        inv = db.execute(f"SELECT i.type, SUM(i.amount) as total FROM investments i WHERE i.user_id=%s{pi_} GROUP BY i.type ORDER BY total DESC", [vid]+pp_i).fetchall()
-        inc = db.execute(f"SELECT inc.source, SUM(inc.amount) as total FROM income inc WHERE inc.user_id=%s{pinc} GROUP BY inc.source ORDER BY total DESC", [vid]+pp_inc).fetchall()
-        recent = db.execute(f"SELECT e.*, c.name as category_name FROM expenses e JOIN categories c ON e.category_id=c.id WHERE e.user_id=%s{pe} ORDER BY e.expense_date DESC LIMIT 8", [vid]+pp_e).fetchall()
-        vu = db.execute("SELECT * FROM users WHERE id=%s", (vid,)).fetchone()
+        exp = fetchall(f"SELECT category_name as name, SUM(amount) as total FROM expenses WHERE user_id = '{qstr(vid)}'{dc_e} GROUP BY category_name ORDER BY total DESC")
+        inv = fetchall(f"SELECT type, SUM(amount) as total FROM investments WHERE user_id = '{qstr(vid)}'{dc_i} GROUP BY type ORDER BY total DESC")
+        inc = fetchall(f"SELECT source, SUM(amount) as total FROM income WHERE user_id = '{qstr(vid)}'{dc_inc} GROUP BY source ORDER BY total DESC")
+        recent = fetchall(f"SELECT * FROM expenses WHERE user_id = '{qstr(vid)}'{dc_e} ORDER BY expense_date DESC LIMIT 8")
+        vu = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(vid)}'")
 
-    te = sum(r["total"] for r in exp) if exp else 0
-    ti = sum(r["total"] for r in inv) if inv else 0
-    tinc = sum(r["total"] for r in inc) if inc else 0
+    te = sum(fnum(r.get("total")) for r in exp)
+    ti = sum(fnum(r.get("total")) for r in inv)
+    tinc = sum(fnum(r.get("total")) for r in inc)
+
     ms, me = get_date_range("month")
     buid = uid if is_all else vid
-    budgets = db.execute("SELECT b.monthly_limit, c.name, COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.user_id=b.user_id AND e.category_id=b.category_id AND e.expense_date BETWEEN %s AND %s),0) as spent FROM budgets b JOIN categories c ON b.category_id=c.id WHERE b.user_id=%s", (ms, me, buid)).fetchall()
+    raw_budgets = fetchall(f"SELECT * FROM budgets WHERE user_id = '{qstr(buid)}'")
+    budgets = []
+    for b in raw_budgets:
+        cat_name = b.get("category_name", "")
+        spent_rows = zcql_query(f"SELECT SUM(amount) as spent FROM expenses WHERE user_id = '{qstr(buid)}' AND category_name = '{qstr(cat_name)}' AND expense_date BETWEEN '{ms}' AND '{me}'")
+        spent = fnum(spent_rows[0].get("spent") if spent_rows else 0)
+        budgets.append({**b, "name": cat_name, "monthly_limit": fnum(b.get("monthly_limit")), "spent": spent})
+
     insights = generate_insights(exp, inv, te, ti, tinc)
 
     return render_template("dashboard.html",
@@ -549,7 +441,8 @@ def dashboard():
         circle_members=circle, view_user_id=vid, viewed_user=vu,
         is_overall=is_all, period=period, user=current_user())
 
-# ── Expenses ─────────────────────────────────────────────────────
+
+# ── Expenses ──────────────────────────────────────────────────────
 
 @app.route("/expenses")
 @login_required
@@ -557,83 +450,106 @@ def expenses():
     uid = session["user_id"]
     vid, is_all = resolve_view(uid)
     period = request.args.get("period", "month")
-    db = get_db()
-    cats = db.execute("SELECT * FROM categories ORDER BY name").fetchall()
+    cats = fetchall("SELECT * FROM categories ORDER BY name")
     circle = get_circle_members(uid)
-    pc, pp = period_clause("e.expense_date", period)
+    dc = date_clause("expense_date", period)
 
     if is_all:
         ids = get_circle_member_ids(uid)
-        ph = ",".join(["%s"]*len(ids))
-        rows = db.execute(f"SELECT e.*, c.name as category_name, u.display_name as owner_name FROM expenses e JOIN categories c ON e.category_id=c.id JOIN users u ON e.user_id=u.id WHERE e.user_id IN ({ph}){pc} ORDER BY e.expense_date DESC", ids+pp).fetchall()
+        in_ids = ",".join([f"'{qstr(i)}'" for i in ids])
+        rows = fetchall(f"SELECT * FROM expenses WHERE user_id IN ({in_ids}){dc} ORDER BY expense_date DESC")
+        nm = uid_name_map(uid, circle)
+        for r in rows:
+            r["owner_name"] = nm.get(str(r.get("user_id")), "Unknown")
         vu, own = None, False
     else:
         if not can_view_user(uid, vid):
-            flash("Access denied.", "danger"); return redirect(url_for("expenses"))
-        rows = db.execute(f"SELECT e.*, c.name as category_name FROM expenses e JOIN categories c ON e.category_id=c.id WHERE e.user_id=%s{pc} ORDER BY e.expense_date DESC", [vid]+pp).fetchall()
-        vu = db.execute("SELECT * FROM users WHERE id=%s", (vid,)).fetchone()
-        own = vid == uid
+            flash("Access denied.", "danger")
+            return redirect(url_for("expenses"))
+        rows = fetchall(f"SELECT * FROM expenses WHERE user_id = '{qstr(vid)}'{dc} ORDER BY expense_date DESC")
+        vu = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(vid)}'")
+        own = str(vid) == str(uid)
 
     return render_template("expenses.html", expenses=rows, categories=cats,
         circle_members=circle, view_user_id=vid, viewed_user=vu,
         is_own=own, is_overall=is_all, period=period,
         recurrence_options=RECURRENCE_OPTIONS, user=current_user())
 
+
 @app.route("/expenses/add", methods=["POST"])
 @login_required
 def add_expense():
     uid = session["user_id"]
-    cid = request.form.get("category_id", type=int)
+    cat_rowid = request.form.get("category_id", "").strip()
     amt = request.form.get("amount", type=float)
-    desc = request.form.get("description","").strip()
-    dt = request.form.get("expense_date","")
-    rec = request.form.get("recurrence","none")
-    if not cid or not amt or not dt:
+    desc = request.form.get("description", "").strip()
+    dt = request.form.get("expense_date", "")
+    rec = request.form.get("recurrence", "none")
+    if not cat_rowid or not amt or not dt:
         flash("Category, amount, and date required.", "danger")
         return redirect(url_for("expenses"))
-    db = get_db()
-    db.execute("INSERT INTO expenses (user_id,category_id,amount,description,expense_date,recurrence) VALUES (%s,%s,%s,%s,%s,%s)",
-               (uid, cid, amt, desc, dt, rec))
-    db.commit()
+    cat = fetchone(f"SELECT name FROM categories WHERE ROWID = '{qstr(cat_rowid)}'")
+    cat_name = cat["name"] if cat else "Other"
+    ds_table("expenses").insert_row({
+        "user_id": uid,
+        "category_id": cat_rowid,
+        "category_name": cat_name,
+        "amount": amt,
+        "description": desc,
+        "expense_date": dt,
+        "recurrence": rec,
+        "created_at": datetime.now().isoformat(),
+    })
     flash("Expense added.", "success")
     return redirect(url_for("expenses"))
 
-@app.route("/expenses/delete/<int:expense_id>", methods=["POST"])
+
+@app.route("/expenses/delete/<expense_id>", methods=["POST"])
 @login_required
 def delete_expense(expense_id):
-    db = get_db()
-    db.execute("DELETE FROM expenses WHERE id=%s AND user_id=%s", (expense_id, session["user_id"]))
-    db.commit()
+    exp = fetchone(f"SELECT user_id FROM expenses WHERE ROWID = '{qstr(expense_id)}'")
+    if exp and str(exp.get("user_id")) == str(session["user_id"]):
+        ds_table("expenses").delete_row(expense_id)
     flash("Expense deleted.", "info")
     return redirect(url_for("expenses"))
 
-@app.route("/expenses/edit/<int:expense_id>", methods=["GET","POST"])
+
+@app.route("/expenses/edit/<expense_id>", methods=["GET", "POST"])
 @login_required
 def edit_expense(expense_id):
     uid = session["user_id"]
-    db = get_db()
-    exp = db.execute("SELECT * FROM expenses WHERE id=%s AND user_id=%s", (expense_id, uid)).fetchone()
-    if not exp:
-        flash("Expense not found.", "danger"); return redirect(url_for("expenses"))
+    exp = fetchone(f"SELECT * FROM expenses WHERE ROWID = '{qstr(expense_id)}'")
+    if not exp or str(exp.get("user_id")) != str(uid):
+        flash("Expense not found.", "danger")
+        return redirect(url_for("expenses"))
     if request.method == "POST":
-        cid = request.form.get("category_id", type=int)
+        cat_rowid = request.form.get("category_id", "").strip()
         amt = request.form.get("amount", type=float)
-        desc = request.form.get("description","").strip()
-        dt = request.form.get("expense_date","")
-        rec = request.form.get("recurrence","none")
-        if not cid or not amt or not dt:
+        desc = request.form.get("description", "").strip()
+        dt = request.form.get("expense_date", "")
+        rec = request.form.get("recurrence", "none")
+        if not cat_rowid or not amt or not dt:
             flash("Category, amount, and date required.", "danger")
             return redirect(url_for("edit_expense", expense_id=expense_id))
-        db.execute("UPDATE expenses SET category_id=%s, amount=%s, description=%s, expense_date=%s, recurrence=%s WHERE id=%s AND user_id=%s",
-                   (cid, amt, desc, dt, rec, expense_id, uid))
-        db.commit()
+        cat = fetchone(f"SELECT name FROM categories WHERE ROWID = '{qstr(cat_rowid)}'")
+        cat_name = cat["name"] if cat else "Other"
+        ds_table("expenses").update_row({
+            "ROWID": expense_id,
+            "category_id": cat_rowid,
+            "category_name": cat_name,
+            "amount": amt,
+            "description": desc,
+            "expense_date": dt,
+            "recurrence": rec,
+        })
         flash("Expense updated.", "success")
         return redirect(url_for("expenses"))
-    cats = db.execute("SELECT * FROM categories ORDER BY name").fetchall()
+    cats = fetchall("SELECT * FROM categories ORDER BY name")
     return render_template("edit_expense.html", expense=exp, categories=cats,
         recurrence_options=RECURRENCE_OPTIONS, user=current_user())
 
-# ── Income / Salary ──────────────────────────────────────────────
+
+# ── Income ────────────────────────────────────────────────────────
 
 @app.route("/income")
 @login_required
@@ -641,81 +557,98 @@ def income():
     uid = session["user_id"]
     vid, is_all = resolve_view(uid)
     period = request.args.get("period", "month")
-    db = get_db()
     circle = get_circle_members(uid)
-    pc, pp = period_clause("inc.income_date", period)
+    dc = date_clause("income_date", period)
 
     if is_all:
         ids = get_circle_member_ids(uid)
-        ph = ",".join(["%s"]*len(ids))
-        rows = db.execute(f"SELECT inc.*, u.display_name as owner_name FROM income inc JOIN users u ON inc.user_id=u.id WHERE inc.user_id IN ({ph}){pc} ORDER BY inc.income_date DESC", ids+pp).fetchall()
+        in_ids = ",".join([f"'{qstr(i)}'" for i in ids])
+        rows = fetchall(f"SELECT * FROM income WHERE user_id IN ({in_ids}){dc} ORDER BY income_date DESC")
+        nm = uid_name_map(uid, circle)
+        for r in rows:
+            r["owner_name"] = nm.get(str(r.get("user_id")), "Unknown")
         vu, own = None, False
     else:
         if not can_view_user(uid, vid):
-            flash("Access denied.", "danger"); return redirect(url_for("income"))
-        rows = db.execute(f"SELECT * FROM income inc WHERE user_id=%s{pc} ORDER BY income_date DESC", [vid]+pp).fetchall()
-        vu = db.execute("SELECT * FROM users WHERE id=%s", (vid,)).fetchone()
-        own = vid == uid
+            flash("Access denied.", "danger")
+            return redirect(url_for("income"))
+        rows = fetchall(f"SELECT * FROM income WHERE user_id = '{qstr(vid)}'{dc} ORDER BY income_date DESC")
+        vu = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(vid)}'")
+        own = str(vid) == str(uid)
 
     return render_template("income.html", incomes=rows, income_sources=INCOME_SOURCES,
         circle_members=circle, view_user_id=vid, viewed_user=vu,
         is_own=own, is_overall=is_all, period=period,
         recurrence_options=RECURRENCE_OPTIONS, user=current_user())
 
+
 @app.route("/income/add", methods=["POST"])
 @login_required
 def add_income():
     uid = session["user_id"]
-    src = request.form.get("source","").strip()
+    src = request.form.get("source", "").strip()
     amt = request.form.get("amount", type=float)
-    desc = request.form.get("description","").strip()
-    dt = request.form.get("income_date","")
-    rec = request.form.get("recurrence","none")
+    desc = request.form.get("description", "").strip()
+    dt = request.form.get("income_date", "")
+    rec = request.form.get("recurrence", "none")
     if not src or not amt or not dt:
         flash("Source, amount, and date required.", "danger")
         return redirect(url_for("income"))
-    db = get_db()
-    db.execute("INSERT INTO income (user_id,source,amount,description,income_date,recurrence) VALUES (%s,%s,%s,%s,%s,%s)",
-               (uid, src, amt, desc, dt, rec))
-    db.commit()
+    ds_table("income").insert_row({
+        "user_id": uid,
+        "source": src,
+        "amount": amt,
+        "description": desc,
+        "income_date": dt,
+        "recurrence": rec,
+        "created_at": datetime.now().isoformat(),
+    })
     flash("Income added.", "success")
     return redirect(url_for("income"))
 
-@app.route("/income/delete/<int:income_id>", methods=["POST"])
+
+@app.route("/income/delete/<income_id>", methods=["POST"])
 @login_required
 def delete_income(income_id):
-    db = get_db()
-    db.execute("DELETE FROM income WHERE id=%s AND user_id=%s", (income_id, session["user_id"]))
-    db.commit()
+    inc = fetchone(f"SELECT user_id FROM income WHERE ROWID = '{qstr(income_id)}'")
+    if inc and str(inc.get("user_id")) == str(session["user_id"]):
+        ds_table("income").delete_row(income_id)
     flash("Income deleted.", "info")
     return redirect(url_for("income"))
 
-@app.route("/income/edit/<int:income_id>", methods=["GET","POST"])
+
+@app.route("/income/edit/<income_id>", methods=["GET", "POST"])
 @login_required
 def edit_income(income_id):
     uid = session["user_id"]
-    db = get_db()
-    inc = db.execute("SELECT * FROM income WHERE id=%s AND user_id=%s", (income_id, uid)).fetchone()
-    if not inc:
-        flash("Income not found.", "danger"); return redirect(url_for("income"))
+    inc = fetchone(f"SELECT * FROM income WHERE ROWID = '{qstr(income_id)}'")
+    if not inc or str(inc.get("user_id")) != str(uid):
+        flash("Income not found.", "danger")
+        return redirect(url_for("income"))
     if request.method == "POST":
-        src = request.form.get("source","").strip()
+        src = request.form.get("source", "").strip()
         amt = request.form.get("amount", type=float)
-        desc = request.form.get("description","").strip()
-        dt = request.form.get("income_date","")
-        rec = request.form.get("recurrence","none")
+        desc = request.form.get("description", "").strip()
+        dt = request.form.get("income_date", "")
+        rec = request.form.get("recurrence", "none")
         if not src or not amt or not dt:
             flash("Source, amount, and date required.", "danger")
             return redirect(url_for("edit_income", income_id=income_id))
-        db.execute("UPDATE income SET source=%s, amount=%s, description=%s, income_date=%s, recurrence=%s WHERE id=%s AND user_id=%s",
-                   (src, amt, desc, dt, rec, income_id, uid))
-        db.commit()
+        ds_table("income").update_row({
+            "ROWID": income_id,
+            "source": src,
+            "amount": amt,
+            "description": desc,
+            "income_date": dt,
+            "recurrence": rec,
+        })
         flash("Income updated.", "success")
         return redirect(url_for("income"))
     return render_template("edit_income.html", income_item=inc, income_sources=INCOME_SOURCES,
         recurrence_options=RECURRENCE_OPTIONS, user=current_user())
 
-# ── Investments ──────────────────────────────────────────────────
+
+# ── Investments ───────────────────────────────────────────────────
 
 @app.route("/investments")
 @login_required
@@ -723,228 +656,265 @@ def investments():
     uid = session["user_id"]
     vid, is_all = resolve_view(uid)
     period = request.args.get("period", "month")
-    db = get_db()
     circle = get_circle_members(uid)
-    pc, pp = period_clause("i.invest_date", period)
+    dc = date_clause("invest_date", period)
 
     if is_all:
         ids = get_circle_member_ids(uid)
-        ph = ",".join(["%s"]*len(ids))
-        rows = db.execute(f"SELECT i.*, u.display_name as owner_name FROM investments i JOIN users u ON i.user_id=u.id WHERE i.user_id IN ({ph}){pc} ORDER BY i.invest_date DESC", ids+pp).fetchall()
+        in_ids = ",".join([f"'{qstr(i)}'" for i in ids])
+        rows = fetchall(f"SELECT * FROM investments WHERE user_id IN ({in_ids}){dc} ORDER BY invest_date DESC")
+        nm = uid_name_map(uid, circle)
+        for r in rows:
+            r["owner_name"] = nm.get(str(r.get("user_id")), "Unknown")
         vu, own = None, False
     else:
         if not can_view_user(uid, vid):
-            flash("Access denied.", "danger"); return redirect(url_for("investments"))
-        rows = db.execute(f"SELECT * FROM investments i WHERE user_id=%s{pc} ORDER BY invest_date DESC", [vid]+pp).fetchall()
-        vu = db.execute("SELECT * FROM users WHERE id=%s", (vid,)).fetchone()
-        own = vid == uid
+            flash("Access denied.", "danger")
+            return redirect(url_for("investments"))
+        rows = fetchall(f"SELECT * FROM investments WHERE user_id = '{qstr(vid)}'{dc} ORDER BY invest_date DESC")
+        vu = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(vid)}'")
+        own = str(vid) == str(uid)
 
     return render_template("investments.html", investments=rows, investment_types=INVESTMENT_TYPES,
         circle_members=circle, view_user_id=vid, viewed_user=vu,
         is_own=own, is_overall=is_all, period=period, user=current_user())
 
+
 @app.route("/investments/add", methods=["POST"])
 @login_required
 def add_investment():
     uid = session["user_id"]
-    t = request.form.get("type","").strip()
+    t = request.form.get("type", "").strip()
     amt = request.form.get("amount", type=float)
-    desc = request.form.get("description","").strip()
-    dt = request.form.get("invest_date","")
+    desc = request.form.get("description", "").strip()
+    dt = request.form.get("invest_date", "")
     if not t or not amt or not dt:
         flash("Type, amount, and date required.", "danger")
         return redirect(url_for("investments"))
-    db = get_db()
-    db.execute("INSERT INTO investments (user_id,type,amount,description,invest_date) VALUES (%s,%s,%s,%s,%s)",
-               (uid, t, amt, desc, dt))
-    db.commit()
+    ds_table("investments").insert_row({
+        "user_id": uid,
+        "type": t,
+        "amount": amt,
+        "description": desc,
+        "invest_date": dt,
+        "created_at": datetime.now().isoformat(),
+    })
     flash("Investment added.", "success")
     return redirect(url_for("investments"))
 
-@app.route("/investments/delete/<int:inv_id>", methods=["POST"])
+
+@app.route("/investments/delete/<inv_id>", methods=["POST"])
 @login_required
 def delete_investment(inv_id):
-    db = get_db()
-    db.execute("DELETE FROM investments WHERE id=%s AND user_id=%s", (inv_id, session["user_id"]))
-    db.commit()
+    inv = fetchone(f"SELECT user_id FROM investments WHERE ROWID = '{qstr(inv_id)}'")
+    if inv and str(inv.get("user_id")) == str(session["user_id"]):
+        ds_table("investments").delete_row(inv_id)
     flash("Investment deleted.", "info")
     return redirect(url_for("investments"))
 
-@app.route("/investments/edit/<int:inv_id>", methods=["GET","POST"])
+
+@app.route("/investments/edit/<inv_id>", methods=["GET", "POST"])
 @login_required
 def edit_investment(inv_id):
     uid = session["user_id"]
-    db = get_db()
-    inv = db.execute("SELECT * FROM investments WHERE id=%s AND user_id=%s", (inv_id, uid)).fetchone()
-    if not inv:
-        flash("Investment not found.", "danger"); return redirect(url_for("investments"))
+    inv = fetchone(f"SELECT * FROM investments WHERE ROWID = '{qstr(inv_id)}'")
+    if not inv or str(inv.get("user_id")) != str(uid):
+        flash("Investment not found.", "danger")
+        return redirect(url_for("investments"))
     if request.method == "POST":
-        t = request.form.get("type","").strip()
+        t = request.form.get("type", "").strip()
         amt = request.form.get("amount", type=float)
-        desc = request.form.get("description","").strip()
-        dt = request.form.get("invest_date","")
+        desc = request.form.get("description", "").strip()
+        dt = request.form.get("invest_date", "")
         if not t or not amt or not dt:
             flash("Type, amount, and date required.", "danger")
             return redirect(url_for("edit_investment", inv_id=inv_id))
-        db.execute("UPDATE investments SET type=%s, amount=%s, description=%s, invest_date=%s WHERE id=%s AND user_id=%s",
-                   (t, amt, desc, dt, inv_id, uid))
-        db.commit()
+        ds_table("investments").update_row({
+            "ROWID": inv_id,
+            "type": t,
+            "amount": amt,
+            "description": desc,
+            "invest_date": dt,
+        })
         flash("Investment updated.", "success")
         return redirect(url_for("investments"))
     return render_template("edit_investment.html", investment=inv, investment_types=INVESTMENT_TYPES, user=current_user())
 
-# ── Budgets ──────────────────────────────────────────────────────
 
-@app.route("/budgets", methods=["GET","POST"])
+# ── Budgets ───────────────────────────────────────────────────────
+
+@app.route("/budgets", methods=["GET", "POST"])
 @login_required
 def budgets():
     uid = session["user_id"]
-    db = get_db()
     if request.method == "POST":
-        cid = request.form.get("category_id", type=int)
+        cat_rowid = request.form.get("category_id", "").strip()
         lim = request.form.get("monthly_limit", type=float)
-        if cid and lim and lim > 0:
-            if IS_PG:
-                db.execute("""INSERT INTO budgets (user_id,category_id,monthly_limit) VALUES (%s,%s,%s)
-                    ON CONFLICT (user_id,category_id) DO UPDATE SET monthly_limit=EXCLUDED.monthly_limit""", (uid, cid, lim))
+        if cat_rowid and lim and lim > 0:
+            cat = fetchone(f"SELECT name FROM categories WHERE ROWID = '{qstr(cat_rowid)}'")
+            cat_name = cat["name"] if cat else "Other"
+            existing = fetchone(f"SELECT ROWID FROM budgets WHERE user_id = '{qstr(uid)}' AND category_name = '{qstr(cat_name)}'")
+            if existing:
+                ds_table("budgets").update_row({"ROWID": existing["ROWID"], "monthly_limit": lim})
             else:
-                db.execute("INSERT OR REPLACE INTO budgets (user_id,category_id,monthly_limit) VALUES (%s,%s,%s)", (uid, cid, lim))
-            db.commit()
+                ds_table("budgets").insert_row({"user_id": uid, "category_name": cat_name, "monthly_limit": lim})
             flash("Budget saved.", "success")
         return redirect(url_for("budgets"))
-    cats = db.execute("SELECT * FROM categories ORDER BY name").fetchall()
-    ms, me = get_date_range("month")
-    bl = db.execute("SELECT b.*, c.name as category_name, COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.user_id=%s AND e.category_id=b.category_id AND e.expense_date BETWEEN %s AND %s),0) as spent FROM budgets b JOIN categories c ON b.category_id=c.id WHERE b.user_id=%s ORDER BY c.name",
-                    (uid, ms, me, uid)).fetchall()
-    return render_template("budgets.html", budgets=bl, categories=cats, user=current_user())
 
-@app.route("/budgets/delete/<int:budget_id>", methods=["POST"])
+    cats = fetchall("SELECT * FROM categories ORDER BY name")
+    ms, me = get_date_range("month")
+    raw_budgets = fetchall(f"SELECT * FROM budgets WHERE user_id = '{qstr(uid)}'")
+    budget_list = []
+    for b in raw_budgets:
+        cat_name = b.get("category_name", "")
+        spent_rows = zcql_query(f"SELECT SUM(amount) as spent FROM expenses WHERE user_id = '{qstr(uid)}' AND category_name = '{qstr(cat_name)}' AND expense_date BETWEEN '{ms}' AND '{me}'")
+        spent = fnum(spent_rows[0].get("spent") if spent_rows else 0)
+        budget_list.append({**b, "name": cat_name, "monthly_limit": fnum(b.get("monthly_limit")), "spent": spent})
+
+    return render_template("budgets.html", budgets=budget_list, categories=cats, user=current_user())
+
+
+@app.route("/budgets/delete/<budget_id>", methods=["POST"])
 @login_required
 def delete_budget(budget_id):
-    db = get_db()
-    db.execute("DELETE FROM budgets WHERE id=%s AND user_id=%s", (budget_id, session["user_id"]))
-    db.commit()
+    b = fetchone(f"SELECT user_id FROM budgets WHERE ROWID = '{qstr(budget_id)}'")
+    if b and str(b.get("user_id")) == str(session["user_id"]):
+        ds_table("budgets").delete_row(budget_id)
     flash("Budget removed.", "info")
     return redirect(url_for("budgets"))
 
-# ── Circle ───────────────────────────────────────────────────────
+
+# ── Circle ────────────────────────────────────────────────────────
 
 @app.route("/circle")
 @login_required
 def circle():
     uid = session["user_id"]
-    db = get_db()
     members = get_circle_members(uid)
-    sent = db.execute("SELECT c.*, u.username, u.display_name FROM circles c JOIN users u ON c.friend_id=u.id WHERE c.user_id=%s AND c.status='pending'", (uid,)).fetchall()
-    received = db.execute("SELECT c.*, u.username, u.display_name FROM circles c JOIN users u ON c.user_id=u.id WHERE c.friend_id=%s AND c.status='pending'", (uid,)).fetchall()
-    return render_template("circle.html", members=members, sent_requests=sent, received_requests=received, user=current_user())
+    sent_raw = fetchall(f"SELECT * FROM circles WHERE user_id = '{qstr(uid)}' AND status = 'pending'")
+    received_raw = fetchall(f"SELECT * FROM circles WHERE friend_id = '{qstr(uid)}' AND status = 'pending'")
+    sent = []
+    for c in sent_raw:
+        u = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(c['friend_id'])}'")
+        if u:
+            sent.append({**c, "username": u["username"], "display_name": u["display_name"]})
+    received = []
+    for c in received_raw:
+        u = fetchone(f"SELECT * FROM users WHERE ROWID = '{qstr(c['user_id'])}'")
+        if u:
+            received.append({**c, "username": u["username"], "display_name": u["display_name"]})
+    return render_template("circle.html", members=members, sent_requests=sent,
+        received_requests=received, user=current_user())
+
 
 @app.route("/circle/add", methods=["POST"])
 @login_required
 def add_to_circle():
     uid = session["user_id"]
-    fu = request.form.get("username","").strip()
+    fu = request.form.get("username", "").strip()
     if not fu:
-        flash("Enter a username.", "danger"); return redirect(url_for("circle"))
-    db = get_db()
-    f = db.execute("SELECT * FROM users WHERE username=%s", (fu,)).fetchone()
-    if not f:
-        flash("User not found.", "danger"); return redirect(url_for("circle"))
-    if f["id"] == uid:
-        flash("Can't add yourself.", "warning"); return redirect(url_for("circle"))
-    ex = db.execute("SELECT * FROM circles WHERE (user_id=%s AND friend_id=%s) OR (user_id=%s AND friend_id=%s)",
-                    (uid, f["id"], f["id"], uid)).fetchone()
-    if ex:
-        flash(f"Already {'connected' if ex['status']=='accepted' else 'pending'}.", "info")
+        flash("Enter a username.", "danger")
         return redirect(url_for("circle"))
-    db.execute("INSERT INTO circles (user_id,friend_id,status) VALUES (%s,%s,'pending')", (uid, f["id"]))
-    db.commit()
+    f = fetchone(f"SELECT * FROM users WHERE username = '{qstr(fu)}'")
+    if not f:
+        flash("User not found.", "danger")
+        return redirect(url_for("circle"))
+    friend_id = f["ROWID"]
+    if str(friend_id) == str(uid):
+        flash("Can't add yourself.", "warning")
+        return redirect(url_for("circle"))
+    ex1 = fetchone(f"SELECT status FROM circles WHERE user_id = '{qstr(uid)}' AND friend_id = '{qstr(friend_id)}'")
+    ex2 = fetchone(f"SELECT status FROM circles WHERE user_id = '{qstr(friend_id)}' AND friend_id = '{qstr(uid)}'")
+    ex = ex1 or ex2
+    if ex:
+        flash(f"Already {'connected' if ex.get('status') == 'accepted' else 'pending'}.", "info")
+        return redirect(url_for("circle"))
+    ds_table("circles").insert_row({
+        "user_id": uid,
+        "friend_id": friend_id,
+        "status": "pending",
+        "created_at": datetime.now().isoformat(),
+    })
     flash(f"Request sent to {f['display_name']}.", "success")
     return redirect(url_for("circle"))
 
-@app.route("/circle/accept/<int:circle_id>", methods=["POST"])
+
+@app.route("/circle/accept/<circle_id>", methods=["POST"])
 @login_required
 def accept_circle(circle_id):
-    db = get_db()
-    db.execute("UPDATE circles SET status='accepted' WHERE id=%s AND friend_id=%s", (circle_id, session["user_id"]))
-    db.commit()
+    c = fetchone(f"SELECT * FROM circles WHERE ROWID = '{qstr(circle_id)}'")
+    if c and str(c.get("friend_id")) == str(session["user_id"]):
+        ds_table("circles").update_row({"ROWID": circle_id, "status": "accepted"})
     flash("Accepted!", "success")
     return redirect(url_for("circle"))
 
-@app.route("/circle/reject/<int:circle_id>", methods=["POST"])
+
+@app.route("/circle/reject/<circle_id>", methods=["POST"])
 @login_required
 def reject_circle(circle_id):
-    db = get_db()
-    db.execute("DELETE FROM circles WHERE id=%s AND friend_id=%s", (circle_id, session["user_id"]))
-    db.commit()
+    c = fetchone(f"SELECT * FROM circles WHERE ROWID = '{qstr(circle_id)}'")
+    if c and str(c.get("friend_id")) == str(session["user_id"]):
+        ds_table("circles").delete_row(circle_id)
     flash("Rejected.", "info")
     return redirect(url_for("circle"))
 
-@app.route("/circle/remove/<int:member_id>", methods=["POST"])
+
+@app.route("/circle/remove/<member_id>", methods=["POST"])
 @login_required
 def remove_from_circle(member_id):
     uid = session["user_id"]
-    db = get_db()
-    db.execute("DELETE FROM circles WHERE (user_id=%s AND friend_id=%s) OR (user_id=%s AND friend_id=%s)", (uid, member_id, member_id, uid))
-    db.commit()
+    c1 = fetchone(f"SELECT ROWID FROM circles WHERE user_id = '{qstr(uid)}' AND friend_id = '{qstr(member_id)}'")
+    c2 = fetchone(f"SELECT ROWID FROM circles WHERE user_id = '{qstr(member_id)}' AND friend_id = '{qstr(uid)}'")
+    for c in [c1, c2]:
+        if c:
+            ds_table("circles").delete_row(c["ROWID"])
     flash("Removed.", "info")
     return redirect(url_for("circle"))
 
-# ── CSV Export ───────────────────────────────────────────────────
+
+# ── CSV Export ────────────────────────────────────────────────────
 
 @app.route("/export/<dtype>")
 @login_required
 def export_csv(dtype):
     uid = session["user_id"]
-    db = get_db()
     buf = io.StringIO()
     w = csv.writer(buf)
     if dtype == "expenses":
-        w.writerow(["Date","Category","Amount","Description","Recurrence"])
-        for r in db.execute("SELECT e.expense_date,c.name,e.amount,e.description,e.recurrence FROM expenses e JOIN categories c ON e.category_id=c.id WHERE e.user_id=%s ORDER BY e.expense_date DESC", (uid,)):
-            w.writerow([r["expense_date"],r["name"],r["amount"],r["description"] or "",r["recurrence"]])
+        w.writerow(["Date", "Category", "Amount", "Description", "Recurrence"])
+        for r in fetchall(f"SELECT * FROM expenses WHERE user_id = '{qstr(uid)}' ORDER BY expense_date DESC"):
+            w.writerow([r.get("expense_date"), r.get("category_name"), r.get("amount"), r.get("description") or "", r.get("recurrence")])
     elif dtype == "income":
-        w.writerow(["Date","Source","Amount","Description","Recurrence"])
-        for r in db.execute("SELECT income_date,source,amount,description,recurrence FROM income WHERE user_id=%s ORDER BY income_date DESC", (uid,)):
-            w.writerow([r["income_date"],r["source"],r["amount"],r["description"] or "",r["recurrence"]])
+        w.writerow(["Date", "Source", "Amount", "Description", "Recurrence"])
+        for r in fetchall(f"SELECT * FROM income WHERE user_id = '{qstr(uid)}' ORDER BY income_date DESC"):
+            w.writerow([r.get("income_date"), r.get("source"), r.get("amount"), r.get("description") or "", r.get("recurrence")])
     elif dtype == "investments":
-        w.writerow(["Date","Type","Amount","Description"])
-        for r in db.execute("SELECT invest_date,type,amount,description FROM investments WHERE user_id=%s ORDER BY invest_date DESC", (uid,)):
-            w.writerow([r["invest_date"],r["type"],r["amount"],r["description"] or ""])
+        w.writerow(["Date", "Type", "Amount", "Description"])
+        for r in fetchall(f"SELECT * FROM investments WHERE user_id = '{qstr(uid)}' ORDER BY invest_date DESC"):
+            w.writerow([r.get("invest_date"), r.get("type"), r.get("amount"), r.get("description") or ""])
     else:
-        flash("Invalid.", "danger"); return redirect(url_for("dashboard"))
+        flash("Invalid.", "danger")
+        return redirect(url_for("dashboard"))
     buf.seek(0)
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment;filename={dtype}_{date.today().isoformat()}.csv"})
 
-# ── APIs ─────────────────────────────────────────────────────────
 
-@app.route("/api/search-users")
-@login_required
-def search_users():
-    uid = session["user_id"]
-    q = request.args.get("q","").strip()
-    if len(q) < 1: return jsonify([])
-    rows = get_db().execute("""
-        SELECT id, username, display_name, avatar_color FROM users
-        WHERE id != %s AND (username LIKE %s OR display_name LIKE %s)
-        AND id NOT IN (SELECT friend_id FROM circles WHERE user_id=%s UNION SELECT user_id FROM circles WHERE friend_id=%s)
-        LIMIT 10""", (uid, f"%{q}%", f"%{q}%", uid, uid)).fetchall()
-    return jsonify([{"username":r["username"],"display_name":r["display_name"],"avatar_color":r["avatar_color"] or "#6366f1"} for r in rows])
+# ── Profile ───────────────────────────────────────────────────────
 
 @app.route("/profile/avatar", methods=["POST"])
 @login_required
 def update_avatar():
-    c = request.form.get("avatar_color","#6366f1")
-    if not c.startswith("#") or len(c) != 7: c = "#6366f1"
-    db = get_db()
-    db.execute("UPDATE users SET avatar_color=%s WHERE id=%s", (c, session["user_id"]))
-    db.commit()
+    c = request.form.get("avatar_color", "#6366f1")
+    if not c.startswith("#") or len(c) != 7:
+        c = "#6366f1"
+    ds_table("users").update_row({"ROWID": session["user_id"], "avatar_color": c})
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     if is_ajax:
         return jsonify(success=True, message="Avatar updated!"), 200
     flash("Avatar updated!", "success")
     return redirect(request.referrer or url_for("dashboard"))
+
 
 @app.route("/profile/picture", methods=["POST"])
 @login_required
@@ -966,43 +936,70 @@ def update_profile_pic():
         return redirect(request.referrer or url_for("dashboard"))
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     filename = f"user_{session['user_id']}.{ext}"
-    # Remove old profile pics with different extensions
     for old_ext in ALLOWED_EXTENSIONS:
         old_path = os.path.join(UPLOAD_FOLDER, f"user_{session['user_id']}.{old_ext}")
         if os.path.exists(old_path):
             os.remove(old_path)
     f.save(os.path.join(UPLOAD_FOLDER, filename))
-    db = get_db()
-    db.execute("UPDATE users SET profile_pic=%s WHERE id=%s", (filename, session["user_id"]))
-    db.commit()
+    ds_table("users").update_row({"ROWID": session["user_id"], "profile_pic": filename})
     if is_ajax:
         pic_url = url_for("static", filename=f"uploads/{filename}")
         return jsonify(success=True, message="Profile picture updated!", pic_url=pic_url), 200
     flash("Profile picture updated!", "success")
     return redirect(request.referrer or url_for("dashboard"))
 
+
 @app.route("/profile/picture/remove", methods=["POST"])
 @login_required
 def remove_profile_pic():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-    db = get_db()
-    user = db.execute("SELECT profile_pic FROM users WHERE id=%s", (session["user_id"],)).fetchone()
-    if user and user["profile_pic"]:
+    user = fetchone(f"SELECT profile_pic FROM users WHERE ROWID = '{qstr(session['user_id'])}'")
+    if user and user.get("profile_pic"):
         pic_path = os.path.join(UPLOAD_FOLDER, user["profile_pic"])
         if os.path.exists(pic_path):
             os.remove(pic_path)
-        db.execute("UPDATE users SET profile_pic=NULL WHERE id=%s", (session["user_id"],))
-        db.commit()
+        ds_table("users").update_row({"ROWID": session["user_id"], "profile_pic": ""})
     if is_ajax:
         return jsonify(success=True, message="Profile picture removed."), 200
     flash("Profile picture removed.", "success")
     return redirect(request.referrer or url_for("dashboard"))
 
-# ── Startup ──────────────────────────────────────────────────────
 
-with app.app_context():
-    init_db()
+# ── API ───────────────────────────────────────────────────────────
+
+@app.route("/api/search-users")
+@login_required
+def search_users():
+    uid = session["user_id"]
+    q = request.args.get("q", "").strip()
+    if len(q) < 1:
+        return jsonify([])
+    c1 = fetchall(f"SELECT friend_id as cid FROM circles WHERE user_id = '{qstr(uid)}'")
+    c2 = fetchall(f"SELECT user_id as cid FROM circles WHERE friend_id = '{qstr(uid)}'")
+    exclude = {str(uid)} | {str(r["cid"]) for r in c1} | {str(r["cid"]) for r in c2}
+    rows = fetchall(f"SELECT * FROM users WHERE username LIKE '%{qstr(q)}%' OR display_name LIKE '%{qstr(q)}%' LIMIT 20")
+    result = []
+    for r in rows:
+        if str(r["ROWID"]) not in exclude:
+            result.append({"username": r["username"], "display_name": r["display_name"],
+                           "avatar_color": r.get("avatar_color") or "#6366f1"})
+            if len(result) >= 10:
+                break
+    return jsonify(result)
+
+
+@app.route("/debug/users")
+def debug_users():
+    users = fetchall("SELECT * FROM users")
+    return jsonify({
+        "total": len(users),
+        "users": [{"id": u.get("ROWID"), "username": u.get("username"),
+                   "display_name": u.get("display_name"), "created_at": u.get("created_at")} for u in users]
+    })
+
+
+# ── Startup ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port)
+    port = int(os.environ.get("X_ZOHO_CATALYST_LISTEN_PORT", os.environ.get("PORT", 9000)))
+    app.run(debug=False, host="0.0.0.0", port=port)
